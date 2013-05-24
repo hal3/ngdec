@@ -17,9 +17,44 @@ bool mtu_matches(uint32_t* src, int n, const mtu* unit) {
 vector<hyp*> extend_hyp(tdata*data, hyp*h) {
   vector<hyp*> ret;
 
-  //cerr<<"num_uncov="<<h->num_uncov<<endl;
-  if (h->num_uncov == 0) return ret;
+  // option 1: GEN_ST
+  // can only do this in the following states
+  //    GEN_ST or GEN_CONT and num_in_queue=0
+  //    any other state
+  if ( (h->num_in_queue == 0) ||
+       ((h->op != OP_GEN_ST) && (h->op != OP_CONT)) ) {
+    
+    posn n = h->j;
 
+    uint32_t src_hash = hash_initialize();
+    for (posn m = 0; (m < MAX_PHRASE_LEN) && (n+m) < data->N; m++) {
+      if (h->cov[n+m]) break;
+      src_hash = hash_increment(src_hash, data->src[n+m]);
+
+      auto iter = data->dict.find(src_hash);
+      if (iter != data->dict.end()) {
+        vector<mtu*> mtus = iter->second;
+        for (auto mtu_iter = mtus.begin(); mtu_iter != mtus.end(); mtu_iter++) {
+          if (mtu_matches(data->src, n, *mtu_iter)) {
+            hyp*next = (hyp*)calloc(1, sizeof(hyp));
+
+            next->op = OP_GEN_ST;
+            next->cur_mtu = *mtu;
+            next->num_in_queue = (*mtu)->src_len - 1;
+
+            next->j = n + 1;
+            next->Z = MAX( n+1, h->Z );
+
+            next->cov = covvec(h->cov);
+            next->cov[n]
+            ret.push_back(next);
+          }
+        }
+      }
+    }
+  }
+
+  /*
   bool hit_any = false;
 
   for (uint32_t n=0; n<data->N; n++) {
@@ -47,6 +82,7 @@ vector<hyp*> extend_hyp(tdata*data, hyp*h) {
           //cerr<<"iter"<<endl;
           if (mtu_matches(data->src, n, *mtu_iter)) {
             //cerr<<"matches: tgt="<<(char)(*mtu_iter)->tgt[0]<<(char)(*mtu_iter)->tgt[1]<<endl;
+
             hyp*next = (hyp*)calloc(1, sizeof(hyp));
             next->m = *mtu_iter;
             next->cov = covvec(h->cov);
@@ -57,6 +93,11 @@ vector<hyp*> extend_hyp(tdata*data, hyp*h) {
             next->prev = h;
             next->cost = data->compute_cost ? data->compute_cost(data, next) : (h->cost + 1.f);
 
+            next->i  = h->i  + (*mtu_iter)->tgt_len;
+            next->j  = h->j  + (*mtu_iter)->src_len;
+            next->j2 = h->j2 + (*mtu_iter)->src_len;
+            next->Z  = h->Z  + (*mtu_iter)->src_len;
+
             ret.push_back(next);
           }
         }
@@ -64,6 +105,8 @@ vector<hyp*> extend_hyp(tdata*data, hyp*h) {
     }
     
   }
+  */
+
   //cerr<< "extensions:";
   for (auto it=ret.begin(); it!=ret.end(); it++) {
     //cerr<< " " << (char)(*it)->m->tgt[0] << (char)(*it)->m->tgt[1];
@@ -76,11 +119,24 @@ vector<hyp*> extend_hyp(tdata*data, hyp*h) {
 hyp* initial_hyp(tdata*data) {
   covvec zeroCov;
   hyp*h0 = (hyp*)calloc(1, sizeof(hyp));
-  h0->m = NULL;
+
+  h0->op = OP_INIT;
+  h0->cur_mtu = NULL;
+  h0->num_in_queue = 0;
+
+  h0->i = 0;
+  h0->j = 0;
+  h0->j2 = 0;
+  h0->Z = 0;
+
   h0->cov = zeroCov;
   h0->num_uncov = data->N;
+  h0->num_gaps = 0;
+  memset(h0->gap_positions, 0, MAX_GAPS * sizeof(posn));
+  
   h0->prev = NULL;
-  h0->cost = 0.f;
+  h0->cost = 0;
+
   return h0;
 }
 
@@ -111,7 +167,7 @@ pair< vector<hyp*>, vector<hyp*> > single_vector_decode(tdata*data) {
   return {Goals, visited};
 }
 
-
+/*
 pair< vector<hyp*>, vector<hyp*> > coverage_vector_decode(tdata*data) {
   hyp*h0 = initial_hyp(data);
 
@@ -186,3 +242,5 @@ vector<const mtu*> hypothesis_mtus(hyp*h) {
   assert(len == 0);
   return mtus;
 }
+*/
+
