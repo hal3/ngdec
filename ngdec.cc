@@ -3,6 +3,11 @@
 #include <float.h>
 #include <stack>
 #include "ngdec.h"
+#include "string.h"
+
+//#include<boost/coroutine/generator.hpp>
+//using namespace coro = boost::coroutines;
+
 
 #define MAX(a,b) (((a)>(b))?(a):(b))
 
@@ -40,9 +45,13 @@ posn get_translation_length(hypothesis<N> *h) {
   posn len = 0;
 
   while (h != NULL) {
-    if (h->last_op == OP_GEN_ST)
-      len += h->cur_mtu->mtu->tgt_len;
-    else if (h->last_op == OP_GEN_T || h->last_op == OP_COPY)
+    if (h->last_op == OP_GEN_ST) {
+      if (h->cur_mtu->mtu->tgt_len == 0) // COPY
+        len ++;
+      else  // GEN_ST
+        len += h->cur_mtu->mtu->tgt_len;
+    }
+    else if (h->last_op == OP_GEN_T) // || h->last_op == OP_COPY)
       len += 1;
     h = h->prev;
   }
@@ -57,18 +66,23 @@ vector<lexeme> get_translation(translation_info<N> *info, hypothesis<N> *h) {
 
   posn m = len-1;
   while (h != NULL) {
-    if (h->last_op == OP_GEN_ST)
-      for (posn i=0; i<h->cur_mtu->mtu->tgt_len; i++) {
-        trans[m] = h->cur_mtu->mtu->tgt[h->cur_mtu->mtu->tgt_len - 1 - i];
+    if (h->last_op == OP_GEN_ST) {
+      if (h->cur_mtu->mtu->tgt_len == 0) { // COPY
+        trans[m] = info->sent[h->n];
         m--;
+      } else { // GEN_ST
+        for (posn i=0; i<h->cur_mtu->mtu->tgt_len; i++) {
+          trans[m] = h->cur_mtu->mtu->tgt[h->cur_mtu->mtu->tgt_len - 1 - i];
+          m--;
+        }
       }
-    else if (h->last_op == OP_GEN_T) {
+    } else if (h->last_op == OP_GEN_T) {
       trans[m] = h->cur_mtu->mtu->tgt[0];
       m--;
-    } else if (h->last_op == OP_COPY) {
+    } /* else if (h->last_op == OP_COPY) {
       trans[m] = info->sent[h->n];
       m--;
-    }
+      } */
 
     h = h->prev;
   }
@@ -107,36 +121,44 @@ hypothesis<N>* next_hypothesis(hypothesis<N> *h) {
     h2->cov_vec_alloc = true;
     h2->n = 0;
     h2->Z = 0;
-    h2->gaps = set<posn>();
+    h2->gaps = new set<posn>();
+    h2->gaps_alloc = true;
     h2->cost = 0.;
     h2->prev = NULL;
   } else {
+    memcpy(h2, h, sizeof(hypothesis<N>));
     h2->last_op = OP_UNKNOWN;
+    h2->cov_vec_alloc = false;
+    h2->gaps_alloc = false;
+    h2->prev = h;
+
+    /*
     h2->cur_mtu = h->cur_mtu;
     h2->queue_head = h->queue_head;
     h2->cov_vec = h->cov_vec;
-    h2->cov_vec_alloc = false;
     h2->cov_vec_count = h->cov_vec_count;
     h2->n = h->n;
     h2->Z = h->Z;
-    h2->gaps = set<posn>(h->gaps);
+    h2->gaps = h->gaps;
     h2->cost = h->cost;
-    h2->prev = h;
+    */
   }
 
   return h2;
 }
 
 template<posn N>
-void print_hypothesis(translation_info<N> *info, hypothesis<N> *h) {
-  cout <<  "last_op="<<OP_NAMES[(size_t)h->last_op];
+void print_hypothesis(hypothesis<N> *h) {
+  cout << h;
+  cout << "\tlast_op="<<OP_NAMES[(size_t)h->last_op];
   cout << "\tcur_mtu="<<h->cur_mtu<<"=";
   if (h->cur_mtu != NULL) print_mtu(h->cur_mtu->mtu);
   else cout<<"___\t";
   cout << "\tqueue_head="<<(uint32_t)h->queue_head;
   cout << "\tn="<<(uint32_t)h->n;
   cout << "\tZ="<<(uint32_t)h->Z;
-  cout << "\tcov="; print_coverage<N>(*h->cov_vec, h->Z);
+  cout << "\tcov "<<(uint32_t)h->cov_vec_count<<"="; print_coverage<N>(*h->cov_vec, h->Z);
+  cout << "\t#gaps="<<h->gaps.size();
   cout << "\tcost="<<h->cost;
   cout << "\tprev="<<h->prev;
   cout << endl;
@@ -144,9 +166,12 @@ void print_hypothesis(translation_info<N> *info, hypothesis<N> *h) {
 
 template<posn N>
 void free_hypothesis(hypothesis<N> *h) {
-  h->gaps.clear();
+  if (h->gaps_alloc)
+    delete h->gaps;
+    
   if (h->cov_vec_alloc)
     delete h->cov_vec;
+
   free(h);
 }
 
@@ -225,6 +250,15 @@ vector<posn> get_lex_positions(translation_info<N> *info, const mtu_for_sent *mt
   return posns;
 }
 
+
+template<posn N>
+void add_operation(translation_info<N>*info, vector<hypothesis<N>*> &ret, hypothesis<N>*h) {
+  if ((info->operation_allowed & (1 << h->last_op)) > 0)
+    ret.push_back(h);
+  else
+    free_hypothesis(h);
+}
+
 template<posn N>
 vector<hypothesis<N>*> expand(translation_info<N> *info, hypothesis<N> *h) {
   vector<hypothesis<N>*> ret;
@@ -235,6 +269,7 @@ vector<hypothesis<N>*> expand(translation_info<N> *info, hypothesis<N> *h) {
     queue_empty = false;
       
   posn n = h->n;
+  posn num_uncovered = N - h->cov_vec_count;
 
   if (! queue_empty) { // then all we can do is CONTINUE
     if (n < N && !is_covered(h, n)) {
@@ -247,21 +282,26 @@ vector<hypothesis<N>*> expand(translation_info<N> *info, hypothesis<N> *h) {
           h2->queue_head++;
           set_covered(h2, n);
           h2->n++;
-          ret.push_back(h2);
+          add_operation(info, ret, h2);
         }
-      } else {  // this is a GAP
+      } else if ((h->gaps->size() < MAX_GAPS) &&
+                 (h->gaps->size() < num_uncovered)) {
         lex = mtu->src[ h->queue_head+1 ]; // now this is the NEXT word
         vector<posn> lex_pos = get_lex_positions(info, h->cur_mtu, h->queue_head+1, n);
         for (auto &j : lex_pos) {
           if (!is_covered(h, j)) {
             hypothesis<N> *h2 = next_hypothesis(h);
             h2->last_op = OP_CONT_G;
-            h2->gaps.insert(h->n);
+            if (! h2->gaps_alloc) {
+              h2->gaps = new set<posn>( *h->gaps );
+              h2->gaps_alloc = true;
+            }
+            h2->gaps->insert(h->n);
             h2->queue_head += 2;
             h2->n = j;
             set_covered(h2, j);
             h2->n++;
-            ret.push_back(h2);
+            add_operation(info, ret, h2);
           }
         }
       }
@@ -276,51 +316,66 @@ vector<hypothesis<N>*> expand(translation_info<N> *info, hypothesis<N> *h) {
         h2->n++;
         h2->cur_mtu = mtu;
         h2->queue_head = 1;
-        ret.push_back(h2);
+        add_operation(info, ret, h2);
       }
     }
 
-    if (false)
-      if (n < N && !is_covered(h, n)) { // generate just S
-        hypothesis<N> *h2 = next_hypothesis(h);
-        h2->cur_mtu = NULL;
-        h2->last_op = OP_GEN_S;
-        set_covered(h2, n);
-        h2->n++;
-        ret.push_back(h2);
+    if ((n < N) && 
+        (!is_covered(h, n)) && 
+        ((h->last_op != OP_GAP))) { // generate just S
+      hypothesis<N> *h2 = next_hypothesis(h);
+      h2->last_op = OP_GEN_S;
+      set_covered(h2, n);
+      h2->n++;
+      h2->cur_mtu = NULL;
+      h2->queue_head = 1;
+      add_operation(info, ret, h2);
+    }
+
+    if ((h->last_op != OP_JUMP_B) &&
+        (h->gaps->size() < MAX_GAPS) &&
+        (h->gaps->size() < num_uncovered) &&
+        (!is_covered(h, n))) {
+      hypothesis<N> *h2 = next_hypothesis(h);
+      h2->cur_mtu = NULL;
+      h2->last_op = OP_GAP;
+      if (! h2->gaps_alloc) {
+        h2->gaps = new set<posn>( *h->gaps );
+        h2->gaps_alloc = true;
       }
+      h2->gaps->insert(h->n);
+      h2->n++;
+      add_operation(info, ret, h2);
+    }
 
     { // TODO: GEN_T
 
     }
 
-    if (false)
-      if (n < N && !is_covered(h, n)) { // copy
-        hypothesis<N> *h2 = next_hypothesis(h);
-        h2->cur_mtu = NULL;
-        h2->last_op = OP_COPY;
-        set_covered(h2, n);
-        h2->n++;
-        ret.push_back(h2);
-      }
-
-    if ( (h->n == h->Z) && (h->last_op != OP_JUMP_E) ) {
-      for (auto &gap_pos : h->gaps) {
-        hypothesis<N> *h2 = next_hypothesis(h);
-        h2->cur_mtu = NULL;
-        h2->last_op = OP_JUMP_B;
-        h2->n = gap_pos;
-        h2->gaps.erase(gap_pos);
-        ret.push_back(h2);
+    if ((h->n == h->Z) &&
+        (h->last_op != OP_GAP)) {
+      for (auto &gap_pos : *h->gaps) {
+        if (gap_pos+1 != h->n) {
+          hypothesis<N> *h2 = next_hypothesis(h);
+          h2->cur_mtu = NULL;
+          h2->last_op = OP_JUMP_B;
+          h2->n = gap_pos;
+          if (! h2->gaps_alloc) {
+            h2->gaps = new set<posn>( *h->gaps );
+            h2->gaps_alloc = true;
+          }
+          h2->gaps->erase(gap_pos);
+          add_operation(info, ret, h2);
+        }
       }
     }
-
+    
     if ( (h->n < h->Z) && (h->last_op != OP_JUMP_B) ) {
       hypothesis<N> *h2 = next_hypothesis(h);
       h2->cur_mtu = NULL;
       h2->last_op = OP_JUMP_E;
       h2->n = h2->Z;
-      ret.push_back(h2);
+      add_operation(info, ret, h2);
     }
   }
 
@@ -365,16 +420,29 @@ pair< vector<hypothesis<N>*>, vector<hypothesis<N>*> > stack_covlen_search(trans
   Stacks[ h0->cov_vec_count ].push_back(h0);
   
   for (posn covered=0; covered<=N; covered++) {
+    //cout<<"==== COVERED " << ((uint32_t)covered) << " ===="<<endl<<endl;;
     float prune_if_gt = get_pruning_threshold(info, Stacks[covered]);
-    for (posn pos=0; pos<Stacks[covered].size(); pos++) {  // do it this way because Stacks[covered] might grow!
-      hypothesis<N> *h = Stacks[covered][pos];
-      if (h->cost > prune_if_gt) continue;
 
-      for (auto &next : expand(info, h))
+    for (uint32_t id=0; id<Stacks[covered].size(); id++) {  // do it this way because Stacks[covered] might grow!
+      hypothesis<N> *h = Stacks[covered][id];
+      if (h->cost > prune_if_gt) continue;
+      //cout<<"expand ("<<id<<"/"<<Stacks[covered].size()<<"): "; print_hypothesis(h);
+      // hypothesis<N> *me = h->prev;
+      // while (me != NULL) {
+      //   cout<<"     -> "; print_hypothesis(me);
+      //   me = me->prev;
+      // }
+
+      for (auto &next : expand(info, h)) {
+        //cout<<"  next: "; print_hypothesis(next);
         if (is_final_hypothesis(info, next))
           Goals.push_back(next);
-        else
-          Stacks[ next->cov_vec_count ].push_back(next);
+        else {
+          if (! (( next->cov_vec_count == id ) && ( next->cost > prune_if_gt )) )
+            Stacks[ next->cov_vec_count ].push_back(next);
+        }
+      }
+      //cout<<endl;
 
       visited.push_back(h);
     }
@@ -456,13 +524,139 @@ float simple_compute_cost(void*info_, hypothesis<N>*h) {
   return h->prev->cost + 1.f;
 }
 
-int main(int argc, char*argv[]) {
+bool is_unaligned(vector< vector<posn> > A, posn j) {
+  for (auto &vec : A)
+    for (auto &p : vec)
+      if (p == j)
+        return false;
+  return true;
+}
+
+void get_operation_sequence(vector< vector<lexeme> > E, vector<lexeme> f, vector< vector<posn> > A) {
+  vector< pair<char, pair<lexeme,lexeme> > > op_seq;
+  set<posn> gaps;
+
+  posn i,j,j2,k,N,Z;
+  N = E.size();
+  i = 0; j = 0; k = 0;
+  
+  bitset<MAX_SENTENCE_LENGTH> fcov;
+
+  while ((j < f.size()) && is_unaligned(A, j)) {
+    op_seq.push_back( { OP_GEN_S, { f[j], 0 } } );
+    //cout << "gen_s " << f[j] << endl;
+    fcov[j] = true;
+    j++;
+  }
+  Z = j;
+
+  while (i < N) {
+    j2 = A[i][k];
+    if (j < j2) {
+      if (! fcov[j]) {
+        op_seq.push_back( { OP_UNKNOWN, { j, 0 } } ); // "insert gap" -- need to fix later!
+        //cout << "insert gap1" << endl;
+        gaps.insert(j);
+      }
+      if (j == Z)
+        j = j2;
+      else {
+        op_seq.push_back( { OP_JUMP_E, { 0, 0 } } );
+        //cout << "jump end" << endl;
+        j = Z;
+      }
+    }
+
+    if (j2 < j) {
+      if ((j < Z) && !fcov[j]) {
+        op_seq.push_back( { OP_UNKNOWN, { j, 0 } } ); // "insert gap" -- need to fix later!
+        //cout << "insert gap2" << endl;
+        gaps.insert(j);
+      }
+
+      posn W = 0;
+      bool found = true;
+      for (auto &pos : gaps) {
+        if (pos == A[i][k])
+          found = true;
+        else if (pos > A[i][k])
+          W++;
+      }
+      assert(found);
+      gaps.erase(A[i][k]);
+      op_seq.push_back( { OP_JUMP_B, { W, 0 } } );
+      //cout << "jump back " << (uint32_t)W << endl;
+      j = A[i][k];
+    }
+
+    if (j < j2) {
+      op_seq.push_back( { OP_UNKNOWN, { j, 0 } } ); // "insert gap" -- need to fix later!
+      //cout << "insert gap3" << endl;
+      gaps.insert(j);
+      j = j2;
+    }
+    if (k == 0) {
+      //cout << "generate " << (char)f[A[i][k]] << " from " << (uint32_t)i << endl;
+      op_seq.push_back( { OP_GEN_ST, { i, k } } );
+      fcov[j] = true;
+    } else {
+      //cout << "continue " << (char)f[A[i][k]] << " from " << (uint32_t)i << endl;
+      op_seq.push_back( { OP_CONT_W, { i, k } } );
+      fcov[j] = true;
+    }
+    j ++;
+    k ++;
+
+    while ((j < f.size()) && is_unaligned(A, j)) {
+      op_seq.push_back( { OP_GEN_S, { f[j], 0 } } );
+      //cout << "gen_s " << f[j] << endl;
+      fcov[j] = true;
+      j++;
+    }
+    if (Z < j)
+      Z = j;
+    if (k == A[i].size()) {
+      i ++;
+      k = 0;
+    }
+  }
+  if (j < Z) {
+    //cout << "jump end" << endl;
+    op_seq.push_back( { OP_JUMP_E, { 0, 0 } } );
+    j = Z;
+  }
+
+  for (auto &op : op_seq)
+    cout << "op=" << OP_NAMES[(uint32_t)op.first] << "\targ=(" << op.second.first << ", " << op.second.second << ")" << endl;
+
+  // now, fix up the gaps (aka unknowns)
+  vector< pair<char, pair<lexeme,lexeme> > > ops;
+  for (size_t i=0; i<op_seq.size(); i++) {
+    if (op_seq[i].first != OP_UNKNOWN)
+      ops.push_back(op_seq[i]);
+    else {
+      assert(i+1 < op_seq.size());
+      assert(op_seq[i+1].first == OP_CONT_W);
+      op_seq[i+1].first = OP_CONT_G;
+    }
+  }
+}
+
+void test_align() {
+  vector< lexeme >         F = { 'D', 'H', 'E', 'I', 'B', 'G' };
+  vector< vector<lexeme> > E = { { 't' }, { 'h' }, { 'r' }, { 'a' }, { 'b' } };
+  vector< vector<posn  > > A = { { 0 }, { 2 }, { 1, 5 }, { 3 }, { 4 } };
+
+  get_operation_sequence(E, F, A);
+}
+
+void test_decode() {
   mtu_item_dict dict;
-  mtu_add_item_string(&dict, "AB", "ab");
+  mtu_add_item_string(&dict, "A_B", "ab");
   mtu_add_item_string(&dict, "A_C", "ac");
   mtu_add_item_string(&dict, "A" , "a");
   mtu_add_item_string(&dict, "B" , "b");
-  mtu_add_item_string(&dict, "BC", "bc");
+  mtu_add_item_string(&dict, "B_C", "bc");
   mtu_add_item_string(&dict, "C" , "c");
 
   const posn N = 6;
@@ -471,16 +665,28 @@ int main(int argc, char*argv[]) {
   info.sent[1] = (uint32_t)'B';
   info.sent[2] = (uint32_t)'C';
   info.sent[3] = (uint32_t)'A';
-  info.sent[4] = (uint32_t)'C';
+  info.sent[4] = (uint32_t)'B';
   info.sent[5] = (uint32_t)'C';
   build_sentence_mtus(&info, dict);
   info.compute_cost = simple_compute_cost;
 
-  info.pruning_coefficient = 1.2;
+  info.operation_allowed =
+    (1 << OP_INIT  ) |
+    (1 << OP_GEN_ST) |
+    (1 << OP_CONT_W) |
+    (1 << OP_CONT_G) |
+    (1 << OP_GEN_S ) |
+    (1 << OP_GEN_T ) |
+    (1 << OP_GAP   ) |
+    (1 << OP_JUMP_B) |
+    (1 << OP_JUMP_E) |
+    0;
+
+  info.pruning_coefficient = 0.;
 
   //pair< vector<hypothesis*>, vector<hypothesis*> > GoalsVisited = greedy_search(&info);
 
-  for (size_t rep = 0; rep < 1; rep++) {
+  for (size_t rep = 0; rep < 1000; rep++) {
 
   pair< vector<hypothesis<N>*>, vector<hypothesis<N>*> > GoalsVisited = stack_covlen_search(&info);
 
@@ -492,12 +698,12 @@ int main(int argc, char*argv[]) {
     for (auto &w : get_translation(&info, hyp))
       cout<<" "<<(char)w;
     cout<<endl;
-    hypothesis<N> *me = hyp;
-    while (me != NULL) {
-      cout<<"\t"; print_hypothesis(&info, me);
-      me = me->prev;
-    }
-    cout<<endl; 
+    // hypothesis<N> *me = hyp;
+    // while (me != NULL) {
+    //   cout<<"\t"; print_hypothesis(me);
+    //   me = me->prev;
+    // }
+    // cout<<endl; 
 
   }
   for (auto &hyp : GoalsVisited.second)
@@ -507,6 +713,20 @@ int main(int argc, char*argv[]) {
 
   free_sentence_mtus(info.mtus_at);
   free_dict(dict);
+}
 
+int main(int argc, char*argv[]) {
+  //test_align();
+  test_decode();
   return 0;
 }
+
+/*
+with expand creating a temporary list, and using bitset
+
+time ./ngdec  > /dev/null
+
+real	3m55.024s
+user	3m30.633s
+sys	0m24.162s
+*/
