@@ -10,10 +10,17 @@
 
 using namespace std;
 
+#define INIT_HYPOTHESIS_RING_SIZE 1024
+
 #define MAX_PHRASE_LEN   3
 #define MAX_GAPS         5
 #define MAX_SENTENCE_LENGTH 200
 #define NUM_MTU_OPTS     5
+#define MAX_VOCAB_SIZE   10000000
+// LM_CONTEXT_LEN=2 means trigram language model
+// TM_CONTEXT_LEN=3 means 4-gram translation model
+#define LM_CONTEXT_LEN   4
+#define TM_CONTEXT_LEN   8
 
 #define OP_UNKNOWN   0
 #define OP_INIT      1
@@ -25,13 +32,17 @@ using namespace std;
 #define OP_GAP       7
 #define OP_JUMP_B    8
 #define OP_JUMP_E    9
+#define OP_CONT_SKIP 10
+#define OP_MAXIMUM   11
 
-string OP_NAMES[10] = { "unknown", "init", "gen_st", "cont_w", "cont_g", "gen_s", "gen_t", "gap", "jump_b", "jump_e" };
+string OP_NAMES[OP_MAXIMUM] = { "unknown", "init", "gen_st", "cont_w", "cont_g", "gen_s", "gen_t", "gap", "jump_b", "jump_e", "cont_skip" };
 
 typedef unsigned char posn;   // should be large enough to store MAX_SENTENCE_LENGTH
 typedef uint32_t lexeme;
+typedef uint32_t mtuid;
 
 lexeme GAP_LEX = (lexeme)-1;
+lexeme BOS_LEX = (lexeme)0;
 
 struct mtu_item {
   posn src_len;
@@ -39,6 +50,8 @@ struct mtu_item {
 
   lexeme src[MAX_PHRASE_LEN];
   lexeme tgt[MAX_PHRASE_LEN];
+
+  mtuid  ident;
 };
 
 struct mtu_for_sent {
@@ -49,32 +62,52 @@ struct mtu_for_sent {
 
 typedef unordered_map< lexeme, vector<mtu_item*>* > mtu_item_dict;
 
-template <posn LEN>
 struct hypothesis {
   char                  last_op;      // most recent operation
   const mtu_for_sent  * cur_mtu;      // the current (optional) mtu we're working on
   posn queue_head;                    // which word in cur_mtu is "next"
   
-  bitset<LEN> * cov_vec;
+  bitset<MAX_SENTENCE_LENGTH> *cov_vec;
   posn cov_vec_count;
   bool cov_vec_alloc;
+  uint32_t cov_vec_hash;
 
   posn n;                             // current position in src
   posn Z;                             // right-most position in src
   set<posn> * gaps;                   // where are the existing gaps
   bool gaps_alloc;
 
+
+  lexeme * lm_context;
+  bool lm_context_alloc;
+  uint32_t lm_context_hash;
+
+  mtuid * tm_context;
+  uint32_t tm_context_hash;
+
+  bool skippable; // recombination says we can be skipped!
+
   float   cost;
   hypothesis * prev;
 };
 
-template <posn LEN>
+struct hypothesis_ring {
+  hypothesis * my_hypotheses;
+  size_t next_hypothesis;
+  size_t my_size;
+  hypothesis_ring* previous_ring;
+};
+
 struct translation_info {
-  lexeme sent[LEN];
+  lexeme sent[MAX_SENTENCE_LENGTH];
+  posn N;
+
+  hypothesis_ring * hyp_ring;
+
   vector< vector<mtu_for_sent*> > mtus_at;
   uint32_t operation_allowed;
   float  pruning_coefficient;
-  float (*compute_cost)(void*,hypothesis<LEN>*);
+  float (*compute_cost)(void*,hypothesis*);
 };
 
 /*
