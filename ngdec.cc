@@ -577,12 +577,9 @@ size_t bucket_contains_equiv(translation_info*info, vector<hypothesis*> bucket, 
       if (memcmp(h->tm_context, h2->tm_context, TM_CONTEXT_LEN * sizeof(mtuid)) != 0)
         continue;
 
-    bool cov_vec_eq = true;
-    for (posn n=0; n<info->N; n++)
-      if (h->cov_vec[n] != h2->cov_vec[n]) {
-        cov_vec_eq = false;
-        break;
-      }
+    (*h->cov_vec) ^= (*h2->cov_vec);
+    bool cov_vec_eq = ! h->cov_vec->any();
+    (*h->cov_vec) ^= (*h2->cov_vec);
 
     if (! cov_vec_eq)
         continue;
@@ -996,15 +993,11 @@ real	1m15.180s
 user	1m6.024s
 sys	0m34.726s
 
-added hypothesis recombination (3g LM, 5g TM)
-real	0m11.321s
-user	0m10.277s
-sys	0m1.772s
-
 added hypothesis recombination (5g LM, 9g TM)
-real	0m13.806s
-user	0m11.925s
-sys	0m3.584s
+real	0m3.510s
+user	0m2.948s
+sys	0m0.832s
+
 
 
 */
