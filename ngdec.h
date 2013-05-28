@@ -7,6 +7,7 @@
 #include <vector>
 #include <bitset>
 #include <set>
+#include "lm/model.hh"
 
 using namespace std;
 
@@ -17,9 +18,7 @@ using namespace std;
 #define MAX_SENTENCE_LENGTH 200
 #define NUM_MTU_OPTS     5
 #define MAX_VOCAB_SIZE   10000000
-// LM_CONTEXT_LEN=2 means trigram language model
 // TM_CONTEXT_LEN=3 means 4-gram translation model
-#define LM_CONTEXT_LEN   4
 #define TM_CONTEXT_LEN   8
 
 #define OP_UNKNOWN   0
@@ -38,10 +37,10 @@ using namespace std;
 string OP_NAMES[OP_MAXIMUM] = { "unknown", "init", "gen_st", "cont_w", "cont_g", "gen_s", "gen_t", "gap", "jump_b", "jump_e", "cont_skip" };
 
 typedef unsigned char posn;   // should be large enough to store MAX_SENTENCE_LENGTH
-typedef uint32_t lexeme;
+typedef lm::WordIndex lexeme;
 typedef uint32_t mtuid;
 
-lexeme GAP_LEX = (lexeme)-1;
+lexeme GAP_LEX = lm::kMaxWordIndex;
 lexeme BOS_LEX = (lexeme)0;
 
 struct mtu_item {
@@ -77,10 +76,14 @@ struct hypothesis {
   set<posn> * gaps;                   // where are the existing gaps
   bool gaps_alloc;
 
-
-  lexeme * lm_context;
+  //lexeme * lm_context;
+  //bool lm_context_alloc;
+  //uint32_t lm_context_hash;
+  lm::ngram::State * lm_context;
   bool lm_context_alloc;
   uint32_t lm_context_hash;
+
+
 
   mtuid * tm_context;
   uint32_t tm_context_hash;
@@ -90,6 +93,8 @@ struct hypothesis {
   float   cost;
   hypothesis * prev;
 };
+
+typedef vector<vector<hypothesis*>> recombination_data;
 
 struct hypothesis_ring {
   hypothesis * my_hypotheses;
@@ -103,11 +108,20 @@ struct translation_info {
   posn N;
 
   hypothesis_ring * hyp_ring;
+  recombination_data * recomb_buckets;
+
+  lm::ngram::Model language_model;
 
   vector< vector<mtu_for_sent*> > mtus_at;
   uint32_t operation_allowed;
   float  pruning_coefficient;
   float (*compute_cost)(void*,hypothesis*);
+
+translation_info(char* ngramFilename) :
+  language_model(ngramFilename)
+  {
+  }
+    
 };
 
 /*

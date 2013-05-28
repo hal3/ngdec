@@ -5,10 +5,9 @@
 #include <stack>
 #include "ngdec.h"
 #include "string.h"
+#include "lm/model.hh"
 
-//#include<boost/coroutine/generator.hpp>
-//using namespace coro = boost::coroutines;
-
+namespace ng=lm::ngram;
 
 #define MAX(a,b) (((a)>(b))?(a):(b))
 
@@ -103,6 +102,7 @@ void set_covered(hypothesis *h, posn n) {
   (*(h->cov_vec))[n] = true;
   h->cov_vec_hash += n * 38904831901;
   h->cov_vec_count++;
+  assert( h->cov_vec_count == h->cov_vec->count() );
 }
 
 void free_hypothesis_ring(hypothesis_ring*r) {
@@ -111,7 +111,7 @@ void free_hypothesis_ring(hypothesis_ring*r) {
     for (size_t i=0; i<r->next_hypothesis; i++) {
       hypothesis *h = r->my_hypotheses + i;
       free(h->tm_context);
-      if (h->lm_context_alloc) free(h->lm_context);
+      if (h->lm_context_alloc) delete h->lm_context;
       if (h->gaps_alloc)       delete h->gaps;
       if (h->cov_vec_alloc)    delete h->cov_vec;
     }
@@ -171,10 +171,9 @@ hypothesis* next_hypothesis(translation_info*info, hypothesis *h) {
     h2->Z = 0;
     h2->gaps = new set<posn>();
     h2->gaps_alloc = true;
-    h2->lm_context = (lexeme*) calloc(LM_CONTEXT_LEN,  sizeof(lexeme));
+    h2->lm_context = new ng::State(info->language_model.BeginSentenceState());
     h2->lm_context_alloc = true;
-    memset(h2->lm_context, BOS_LEX, LM_CONTEXT_LEN);
-    h2->lm_context_hash = hash_context<lexeme>(h2->lm_context, LM_CONTEXT_LEN);
+    h2->lm_context_hash = ng::hash_value(*h2->lm_context);
     h2->tm_context = (mtuid*) calloc(TM_CONTEXT_LEN, sizeof(mtuid));
     memset(h2->tm_context, OP_INIT, TM_CONTEXT_LEN);
     h2->tm_context_hash = hash_context<mtuid>(h2->tm_context, TM_CONTEXT_LEN);
@@ -343,7 +342,6 @@ bool prepare_for_add(translation_info*info, hypothesis*h) {
     h->Z = MAX(h->Z, h->n);
     h->cost = info->compute_cost(info, h);
 
-    // TODO: add to tm context!
     mtuid tm = h->last_op;
     switch (h->last_op) {
     case OP_JUMP_B:
@@ -373,33 +371,25 @@ bool prepare_for_add(translation_info*info, hypothesis*h) {
   }
 }
 
-void shift_lm_context(hypothesis *h, posn M, lexeme*tgt) {
-  // TODO: check for copy/tgt=null
+float shift_lm_context(translation_info* info, hypothesis *h, posn M, lexeme*tgt) {
+  float log_prob = 0.;
 
-  if (M >= LM_CONTEXT_LEN) { // this completely overwrites our context
-    if (! h->lm_context_alloc) {
-      h->lm_context = (lexeme*) calloc(LM_CONTEXT_LEN, sizeof(lexeme));
-      h->lm_context_alloc = true;
-    }
-    size_t placement = M - LM_CONTEXT_LEN;
-    memcpy(h->lm_context, tgt + placement, LM_CONTEXT_LEN * sizeof(lexeme));
-  } else { // we retain some of our old context
-    if (! h->lm_context_alloc) {
-      h->lm_context = (lexeme*) calloc(LM_CONTEXT_LEN, sizeof(lexeme));
-      h->lm_context_alloc = true;
-      // TODO: don't really need to do all this copying
-      memcpy(h->lm_context, h->prev->lm_context, LM_CONTEXT_LEN * sizeof(lexeme));
-    }
-    size_t num_keep = LM_CONTEXT_LEN - M;
-    memmove(h->lm_context, h->lm_context + M, num_keep * sizeof(lexeme));
-    memcpy(h->lm_context + num_keep, tgt, M * sizeof(lexeme));
+  if (!h->lm_context_alloc) {
+    h->lm_context = new ng::State(*(h->lm_context));
+    h->lm_context_alloc = true;
   }
-  h->lm_context_hash = hash_context<lexeme>(h->lm_context, LM_CONTEXT_LEN);
+  ng::State in_state = *(h->lm_context);
+
+  in_state = *(h->lm_context);
+  for (posn m=0; m<M; m++) {
+    log_prob += info->language_model.Score(in_state, tgt[m], *(h->lm_context));
+    in_state = *(h->lm_context);
+  }
+  h->lm_context_hash = ng::hash_value(*h->lm_context);
+
+  return log_prob;
 }
 
-
-//vector<hypothesis*> expand(translation_info *info, hypothesis *h) {
-//  vector<hypothesis*> ret;
 void expand(translation_info *info, hypothesis *h, function<void(hypothesis*)> add_operation) {
 
   // first check to see if the queue is empty
@@ -474,7 +464,7 @@ void expand(translation_info *info, hypothesis *h, function<void(hypothesis*)> a
         h2->n++;
         h2->cur_mtu = mtu;
         h2->queue_head = 1;
-        shift_lm_context(h2, mtu->mtu->tgt_len, mtu->mtu->tgt);
+        shift_lm_context(info, h2, mtu->mtu->tgt_len, mtu->mtu->tgt);
         if (prepare_for_add(info, h2)) add_operation(h2);
       }
     }
@@ -570,7 +560,7 @@ size_t bucket_contains_equiv(translation_info*info, vector<hypothesis*> bucket, 
     if (h->cov_vec_hash    != h2->cov_vec_hash   ) continue;
 
     if (h->lm_context != h2->lm_context)
-      if (memcmp(h->lm_context, h2->lm_context, LM_CONTEXT_LEN * sizeof(lexeme)) != 0)
+      if (! (*(h->lm_context) == *(h2->lm_context)))
         continue;
 
     if (h->tm_context != h2->tm_context)
@@ -589,26 +579,55 @@ size_t bucket_contains_equiv(translation_info*info, vector<hypothesis*> bucket, 
   return (size_t)-1;
 }
 
-void recombine_stack(translation_info *info, vector<hypothesis*> stack, size_t mod) {
-  vector<vector<hypothesis*>> buckets(mod);  // TODO: pre-allocate this in info
-  cout << buckets.size();
+void recombine_stack(translation_info *info, vector<hypothesis*> stack) {
+  recombination_data * buckets = info->recomb_buckets;
+  size_t mod = buckets->size();
+
+  for (auto vec = buckets->begin(); vec != buckets->end(); vec++)
+    (*vec).clear();
+
   for (auto h : stack) {
     if (h->skippable) continue;
     size_t id = (h->lm_context_hash * 3481183 +
                  h->tm_context_hash * 8942137 +
                  h->cov_vec_hash    * 9138921) % mod;
 
-    size_t equiv_pos = bucket_contains_equiv(info, buckets[id], h);
+    size_t equiv_pos = bucket_contains_equiv(info, (*buckets)[id], h);
 
     if (equiv_pos == (size_t)-1) {  // there was NOT an equivalent hyp
-      buckets[id].push_back(h);
+      (*buckets)[id].push_back(h);
     } else {  // there was at position equiv_pos      
-      if (h->cost < buckets[id][equiv_pos]->cost) {
-        buckets[id][equiv_pos]->skippable = true;
-        buckets[id][equiv_pos] = h;
+      if (h->cost < (*buckets)[id][equiv_pos]->cost) {
+        (*buckets)[id][equiv_pos]->skippable = true;
+        (*buckets)[id][equiv_pos] = h;
       } else {
         h->skippable = true;
       }
+    }
+  }
+}
+
+void add_to_stack(translation_info *info, vector<hypothesis*> &S, hypothesis*h) {
+  if (false) {
+    S.push_back(h);
+    return;
+  }
+  recombination_data *buckets = (info->recomb_buckets);
+  size_t mod = buckets->size();
+
+  if (h->skippable) return;
+  size_t id = (h->lm_context_hash * 3481183 +
+               h->tm_context_hash * 8942137 +
+               h->cov_vec_hash    * 9138921) % mod;
+  
+  size_t equiv_pos = bucket_contains_equiv(info, (*buckets)[id], h);
+  if (equiv_pos == (size_t)-1) {  // there was NOT an equivalent hyp
+    S.push_back(h);
+  } else {  // there was at position equiv_pos      
+    if (h->cost < (*buckets)[id][equiv_pos]->cost) {
+      S.push_back(h);
+    } else {
+      h->skippable = true;
     }
   }
 }
@@ -626,7 +645,7 @@ pair< vector<hypothesis*>, vector<hypothesis*> > stack_covlen_search(translation
   for (posn covered=0; covered<=N; covered++) {
     //cout<<"==== COVERED " << ((uint32_t)covered) << " ===="<<endl<<endl;;
     float prune_if_gt = get_pruning_threshold(info, Stacks[covered]);
-    recombine_stack(info, Stacks[covered], 10231);
+    if (true) recombine_stack(info, Stacks[covered]);
 
     for (uint32_t id=0; id<Stacks[covered].size(); id++) {  // do it this way because Stacks[covered] might grow!
       hypothesis *h = Stacks[covered][id];
@@ -644,7 +663,11 @@ pair< vector<hypothesis*>, vector<hypothesis*> > stack_covlen_search(translation
           //cout<<"  next: "; print_hypothesis(info, next);
           if (is_final_hypothesis(info, next))
             Goals.push_back(next);
-          else if (! (( next->cov_vec_count == covered ) && ( next->cost > prune_if_gt )) )
+          else if (next->cov_vec_count == covered) {
+            if ( next->cost <= prune_if_gt )
+              //Stacks[ covered ].push_back(next);
+              add_to_stack(info, Stacks[ covered ], next);
+          } else
             Stacks[ next->cov_vec_count ].push_back(next);
           //else
           //  free_hypothesis(next);
@@ -865,7 +888,7 @@ void test_decode() {
   mtu_add_item_string(&dict, 4, "B_C", "bc");
   mtu_add_item_string(&dict, 5, "C" , "c");
 
-  translation_info info;
+  translation_info info("file.arpa-bin");
   info.N       = 6;
   info.sent[0] = (uint32_t)'A';
   info.sent[1] = (uint32_t)'B';
@@ -893,8 +916,12 @@ void test_decode() {
 
   //pair< vector<hypothesis*>, vector<hypothesis*> > GoalsVisited = greedy_search(&info);
 
+  info.recomb_buckets = new recombination_data(10231);
+
   for (size_t rep = 0; rep < 1 + 1*199; rep++) {
+    cerr<<".";
     info.hyp_ring = initialize_hypothesis_ring(INIT_HYPOTHESIS_RING_SIZE);
+
     pair< vector<hypothesis*>, vector<hypothesis*> > GoalsVisited = stack_covlen_search(&info);
 
 
@@ -915,19 +942,37 @@ void test_decode() {
 
     free_hypothesis_ring(info.hyp_ring);
   }
-  // for (auto &hyp : GoalsVisited.second)
-  //   free_hypothesis(hyp);
-  // }
-
+  cerr<<endl;
+  delete info.recomb_buckets;
   free_sentence_mtus(info.mtus_at);
   free_dict(dict);
+}
+
+void test_lm() {
+  ng::Model model("file.arpa");
+  ng::State state(model.BeginSentenceState()), out_state;
+  const ng::Vocabulary &vocab = model.GetVocabulary();
+  std::string word;
+  while (std::cin >> word) {
+    std::cout << model.Score(state, vocab.Index(word), out_state) << '\n';
+    state = out_state;
+  }
 }
 
 int main(int argc, char*argv[]) {
   //test_align();
   test_decode();
+  //test_lm();
   return 0;
 }
+
+/*
+KENLM:
+  after running ./compile_query_only.sh
+  create an archive:
+    ar rvs kenlm.a util/double-conversion/bignum.o util/double-conversion/bignum-dtoa.o util/double-conversion/cached-powers.o util/double-conversion/diy-fp.o util/double-conversion/double-conversion.o util/double-conversion/fast-dtoa.o util/double-conversion/fixed-dtoa.o util/double-conversion/strtod.o util/bit_packing.o util/ersatz_progress.o util/exception.o util/file.o util/file_piece.o util/mmap.o util/murmur_hash.o util/pool.o util/read_compressed.o util/scoped.o util/string_piece.o util/usage.o lm/bhiksha.o lm/binary_format.o lm/config.o lm/lm_exception.o lm/model.o lm/quantize.o lm/read_arpa.o lm/search_hashed.o lm/search_trie.o lm/sizes.o lm/trie.o lm/trie_sort.o lm/value_build.o lm/virtual_interface.o lm/vocab.o
+  copy it to the ngdec directory
+*/
 
 /*
 with expand creating a temporary list, and using bitset
@@ -998,6 +1043,15 @@ real	0m3.510s
 user	0m2.948s
 sys	0m0.832s
 
+checking recombination on insertion into current stack
+real	0m3.158s
+user	0m2.916s
+sys	0m0.228s
+
+switched to kenlm
+real	0m1.992s
+user	0m1.860s
+sys	0m0.176s
 
 
 */
