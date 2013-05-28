@@ -83,8 +83,6 @@ struct hypothesis {
   bool lm_context_alloc;
   uint32_t lm_context_hash;
 
-
-
   mtuid * tm_context;
   uint32_t tm_context_hash;
 

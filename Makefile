@@ -1,5 +1,5 @@
 ARCH = $(shell test `g++ -v 2>&1 | tail -1 | cut -d ' ' -f 3 | cut -d '.' -f 1,2` \< 4.3 && echo -march=nocona || echo -march=native)  -std=c++0x
-OPTIM_FLAGS = -O3 -fomit-frame-pointer -ffast-math -fno-strict-aliasing
+OPTIM_FLAGS = -O3 -ffast-math -fno-strict-aliasing -fomit-frame-pointer 
 
 KENLM_DIR = /home/hal/download/kenlm
 KENLM_FLAGS = -I$(KENLM_DIR) -DKENLM_MAX_ORDER=9

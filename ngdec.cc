@@ -108,9 +108,11 @@ void set_covered(hypothesis *h, posn n) {
 void free_hypothesis_ring(hypothesis_ring*r) {
   vector<hypothesis_ring*> to_free;
   while (r != NULL) {
+    for (size_t i=0; i<r->my_size; i++) 
+      free(r->my_hypotheses[i].tm_context);
+
     for (size_t i=0; i<r->next_hypothesis; i++) {
       hypothesis *h = r->my_hypotheses + i;
-      free(h->tm_context);
       if (h->lm_context_alloc) delete h->lm_context;
       if (h->gaps_alloc)       delete h->gaps;
       if (h->cov_vec_alloc)    delete h->cov_vec;
@@ -126,6 +128,8 @@ void free_hypothesis_ring(hypothesis_ring*r) {
 hypothesis_ring* initialize_hypothesis_ring(size_t desired_size) {
   hypothesis_ring *r = (hypothesis_ring*) calloc(1, sizeof(hypothesis_ring));
   r->my_hypotheses = (hypothesis*) calloc(desired_size, sizeof(hypothesis));
+  for (size_t i=0; i<desired_size; i++)
+    r->my_hypotheses[i].tm_context = (mtuid*) calloc(TM_CONTEXT_LEN, sizeof(mtuid));
   r->next_hypothesis = 0;
   r->my_size = desired_size;
   r->previous_ring = NULL;
@@ -147,14 +151,6 @@ hypothesis* get_next_hyp_ring_element(translation_info *info) {
   return info->hyp_ring->my_hypotheses + (info->hyp_ring->next_hypothesis-1);
 }
 
-template<class T>
-uint32_t hash_context(T *context, size_t length) {
-  uint32_t hash = 13984321;
-  for (size_t i=0; i<length; i++)
-    hash = (hash * 3910489) + context[i];
-  return hash;
-}
-
 
 hypothesis* next_hypothesis(translation_info*info, hypothesis *h) {
   hypothesis *h2 = get_next_hyp_ring_element(info);
@@ -174,37 +170,22 @@ hypothesis* next_hypothesis(translation_info*info, hypothesis *h) {
     h2->lm_context = new ng::State(info->language_model.BeginSentenceState());
     h2->lm_context_alloc = true;
     h2->lm_context_hash = ng::hash_value(*h2->lm_context);
-    h2->tm_context = (mtuid*) calloc(TM_CONTEXT_LEN, sizeof(mtuid));
     memset(h2->tm_context, OP_INIT, TM_CONTEXT_LEN);
-    h2->tm_context_hash = hash_context<mtuid>(h2->tm_context, TM_CONTEXT_LEN);
+    h2->tm_context_hash = util::MurmurHashNative(h2->tm_context, TM_CONTEXT_LEN * sizeof(mtuid), 0);
     h2->skippable = false;
     h2->cost = 1.;
     h2->prev = NULL;
   } else {
+    mtuid* old_tm_context = h2->tm_context;
     memcpy(h2, h, sizeof(hypothesis));
     h2->last_op = OP_UNKNOWN;
     h2->cov_vec_alloc = false;
     h2->gaps_alloc = false;
     h2->lm_context_alloc = false;
-
-    h2->tm_context = (mtuid*) calloc(TM_CONTEXT_LEN, sizeof(mtuid));
+    h2->tm_context = old_tm_context;
     memcpy(h2->tm_context, h->tm_context, TM_CONTEXT_LEN-1);
-    h2->tm_context_hash = hash_context<mtuid>(h2->tm_context, TM_CONTEXT_LEN);  // TODO: could be faster
-
-    h2->skippable = false;  // TODO: maybe can get rid of this???
+    h2->skippable = false;
     h2->prev = h;
-
-
-    /*
-    h2->cur_mtu = h->cur_mtu;
-    h2->queue_head = h->queue_head;
-    h2->cov_vec = h->cov_vec;
-    h2->cov_vec_count = h->cov_vec_count;
-    h2->n = h->n;
-    h2->Z = h->Z;
-    h2->gaps = h->gaps;
-    h2->cost = h->cost;
-    */
   }
 
   return h2;
@@ -363,7 +344,8 @@ bool prepare_for_add(translation_info*info, hypothesis*h) {
 
     memmove(h->tm_context, h->tm_context+1, (TM_CONTEXT_LEN-1) * sizeof(mtuid));
     h->tm_context[TM_CONTEXT_LEN-1]= tm;
-    h->tm_context_hash = hash_context<mtuid>(h->tm_context, TM_CONTEXT_LEN);
+
+    h->tm_context_hash = util::MurmurHashNative(h->tm_context, TM_CONTEXT_LEN * sizeof(mtuid), 0);
 
     return true;
   } else {
@@ -888,7 +870,7 @@ void test_decode() {
   mtu_add_item_string(&dict, 4, "B_C", "bc");
   mtu_add_item_string(&dict, 5, "C" , "c");
 
-  translation_info info("file.arpa-bin");
+  translation_info info((char*)"file.arpa-bin");
   info.N       = 6;
   info.sent[0] = (uint32_t)'A';
   info.sent[1] = (uint32_t)'B';
@@ -918,7 +900,7 @@ void test_decode() {
 
   info.recomb_buckets = new recombination_data(10231);
 
-  for (size_t rep = 0; rep < 1 + 1*199; rep++) {
+  for (size_t rep = 0; rep < 1 + 1*999; rep++) {
     cerr<<".";
     info.hyp_ring = initialize_hypothesis_ring(INIT_HYPOTHESIS_RING_SIZE);
 
@@ -980,79 +962,51 @@ with expand creating a temporary list, and using bitset
 time ./ngdec  > /dev/null   (1000 reps)
 
 real	3m55.024s
-user	3m30.633s
-sys	0m24.162s
 
 switch to vector<bool>
 real	4m36.946s
-user	4m11.424s
-sys	0m25.226s
 
 switch to bitset<MAX_SENTENCE_LENGTH>
 real	4m5.635s
-user	3m40.790s
-sys	0m24.590s
 
 switch to functional expand
 real	4m5.045s
-user	3m38.974s
-sys	0m25.790s
 
 fixing "gap doesn't consume a position" bug
 real	3m50.487s
-user	3m25.809s
-sys	0m24.438s
 
 adding SKIP GAP
 real	3m57.525s
-user	3m32.305s
-sys	0m24.946s
 
 (switch to 200 reps)
 real	0m48.737s
-user	0m43.379s
-sys	0m5.276s
 
 refactoring skip/gap
 real	0m48.483s
-user	0m43.091s
-sys	0m5.344s
 
 added ngram contexts
 real	0m53.590s
-user	0m47.935s
-sys	0m5.592s
 
 added hypothesis ring (1024)
 real	0m43.693s
-user	0m38.338s
-sys	0m5.300s
 
 growable hypothesis ring
 real	0m43.438s
-user	0m37.966s
-sys	0m5.428s
 
 added history and hashes for covvec and lm and tm
 real	1m15.180s
-user	1m6.024s
-sys	0m34.726s
 
 added hypothesis recombination (5g LM, 9g TM)
 real	0m3.510s
-user	0m2.948s
-sys	0m0.832s
 
 checking recombination on insertion into current stack
 real	0m3.158s
-user	0m2.916s
-sys	0m0.228s
 
 switched to kenlm
 real	0m1.992s
-user	0m1.860s
-sys	0m0.176s
 
+back to 1000, a bit more allocating at the front (tm_context)
+real	0m10.340s
 
 */
   
