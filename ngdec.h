@@ -13,7 +13,7 @@ using namespace std;
 
 #define INIT_HYPOTHESIS_RING_SIZE 1024
 
-#define MAX_PHRASE_LEN   3
+#define MAX_PHRASE_LEN   10
 #define MAX_GAPS         5
 #define MAX_SENTENCE_LENGTH 200
 #define NUM_MTU_OPTS     5
@@ -51,6 +51,8 @@ struct mtu_item {
   lexeme tgt[MAX_PHRASE_LEN];
 
   mtuid  ident;
+
+  bool operator<(const mtu_item &lhs) const { return ident < lhs.ident; }
 };
 
 struct mtu_for_sent {
@@ -91,8 +93,15 @@ struct hypothesis {
   float   cost;
   hypothesis * prev;
 };
+  
 
 typedef vector<vector<hypothesis*>> recombination_data;
+
+struct aligned_sentence_pair {
+  vector<lexeme>           F;
+  vector< vector<lexeme> > E;
+  vector< vector<posn>   > A;
+};
 
 struct hypothesis_ring {
   hypothesis * my_hypotheses;
@@ -108,18 +117,12 @@ struct translation_info {
   hypothesis_ring * hyp_ring;
   recombination_data * recomb_buckets;
 
-  lm::ngram::Model language_model;
+  lm::ngram::Model * language_model;
 
   vector< vector<mtu_for_sent*> > mtus_at;
   uint32_t operation_allowed;
   float  pruning_coefficient;
   float (*compute_cost)(void*,hypothesis*);
-
-translation_info(char* ngramFilename) :
-  language_model(ngramFilename)
-  {
-  }
-    
 };
 
 /*

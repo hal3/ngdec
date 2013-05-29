@@ -21,7 +21,6 @@ while (1) {
 
     $_ = <A>;
     if (not defined $_) { die; }
-    s/-/ /g;
     printIt($_);
     print "\n";
 }

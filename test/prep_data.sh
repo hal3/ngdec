@@ -21,6 +21,8 @@ echo =======================================================
 lmplz -o $LM_ORDER -S 10% < test.en > test.en.arpa
 build_binary test.en.arpa test.en.arpa-bin
 echo
+# warning: do NOT us a trie for the binary LM -- it will screw with word ids
+
 
 echo ======================================================
 echo ===== building French monolingual language model =====
@@ -28,6 +30,7 @@ echo ======================================================
 lmplz -o $LM_ORDER -S 10% < test.fr > test.fr.arpa
 build_binary test.fr.arpa test.fr.arpa-bin
 echo
+# warning: do NOT us a trie for the binary LM -- it will screw with word ids
 
 echo =========================================
 echo ===== mapping words to IDs: English =====

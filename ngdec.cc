@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <float.h>
 #include <stack>
+#include <unordered_set>
 #include "ngdec.h"
 #include "string.h"
 #include "lm/model.hh"
@@ -167,9 +168,15 @@ hypothesis* next_hypothesis(translation_info*info, hypothesis *h) {
     h2->Z = 0;
     h2->gaps = new set<posn>();
     h2->gaps_alloc = true;
-    h2->lm_context = new ng::State(info->language_model.BeginSentenceState());
-    h2->lm_context_alloc = true;
-    h2->lm_context_hash = ng::hash_value(*h2->lm_context);
+    if (info->language_model == NULL) {
+      h2->lm_context = NULL;
+      h2->lm_context_alloc = false;
+      h2->lm_context_hash = 0;
+    } else {
+      h2->lm_context = new ng::State(info->language_model->BeginSentenceState());
+      h2->lm_context_alloc = true;
+      h2->lm_context_hash = ng::hash_value(*h2->lm_context);
+    }
     memset(h2->tm_context, OP_INIT, TM_CONTEXT_LEN);
     h2->tm_context_hash = util::MurmurHashNative(h2->tm_context, TM_CONTEXT_LEN * sizeof(mtuid), 0);
     h2->skippable = false;
@@ -355,6 +362,8 @@ bool prepare_for_add(translation_info*info, hypothesis*h) {
 
 float shift_lm_context(translation_info* info, hypothesis *h, posn M, lexeme*tgt) {
   float log_prob = 0.;
+  if (info->language_model == NULL)
+    return log_prob;
 
   if (!h->lm_context_alloc) {
     h->lm_context = new ng::State(*(h->lm_context));
@@ -364,7 +373,7 @@ float shift_lm_context(translation_info* info, hypothesis *h, posn M, lexeme*tgt
 
   in_state = *(h->lm_context);
   for (posn m=0; m<M; m++) {
-    log_prob += info->language_model.Score(in_state, tgt[m], *(h->lm_context));
+    log_prob += info->language_model->Score(in_state, tgt[m], *(h->lm_context));
     in_state = *(h->lm_context);
   }
   h->lm_context_hash = ng::hash_value(*h->lm_context);
@@ -541,9 +550,10 @@ size_t bucket_contains_equiv(translation_info*info, vector<hypothesis*> bucket, 
     if (h->tm_context_hash != h2->tm_context_hash) continue;
     if (h->cov_vec_hash    != h2->cov_vec_hash   ) continue;
 
-    if (h->lm_context != h2->lm_context)
-      if (! (*(h->lm_context) == *(h2->lm_context)))
-        continue;
+    if (info->language_model != NULL)
+      if (h->lm_context != h2->lm_context)
+        if (! (*(h->lm_context) == *(h2->lm_context)))
+          continue;
 
     if (h->tm_context != h2->tm_context)
       if (memcmp(h->tm_context, h2->tm_context, TM_CONTEXT_LEN * sizeof(mtuid)) != 0)
@@ -614,53 +624,60 @@ void add_to_stack(translation_info *info, vector<hypothesis*> &S, hypothesis*h) 
   }
 }
 
-pair< vector<hypothesis*>, vector<hypothesis*> > stack_covlen_search(translation_info *info) {
-  posn N = info->N;
-  hypothesis *h0 = next_hypothesis(info, NULL);
-
-  vector< vector<hypothesis*> > Stacks(N+1);
+pair< vector<hypothesis*>, vector<hypothesis*> > stack_generic_search(translation_info *info, size_t (*get_stack_id)(hypothesis*), size_t num_stacks_reserve=0) {
+  unordered_map< size_t, vector<hypothesis*>* > Stacks;
+  stack< size_t > NextStacks;
   vector< hypothesis* > visited;
   vector< hypothesis* > Goals;
 
-  Stacks[ h0->cov_vec_count ].push_back(h0);
-  
-  for (posn covered=0; covered<=N; covered++) {
-    //cout<<"==== COVERED " << ((uint32_t)covered) << " ===="<<endl<<endl;;
-    float prune_if_gt = get_pruning_threshold(info, Stacks[covered]);
-    if (true) recombine_stack(info, Stacks[covered]);
+  if (num_stacks_reserve > 0) {
+    Stacks.reserve(num_stacks_reserve);
+  }
+  assert(Stacks[5] == NULL); assert(Stacks[57] == NULL);
 
-    for (uint32_t id=0; id<Stacks[covered].size(); id++) {  // do it this way because Stacks[covered] might grow!
-      hypothesis *h = Stacks[covered][id];
-      if (h->cost > prune_if_gt) continue;
-      if (h->skippable) continue;
+  hypothesis *h0 = next_hypothesis(info, NULL);
+  size_t stack0 = get_stack_id(h0);
+  NextStacks.push(stack0);
+  Stacks[stack0] = new vector<hypothesis*>();
+  Stacks[stack0]->push_back(h0);
 
-      //cout<<"expand ("<<id<<"/"<<Stacks[covered].size()<<"): "; print_hypothesis(info, h);
-      // hypothesis *me = h->prev;
-      // while (me != NULL) {
-      //   cout<<"     -> "; print_hypothesis(info, me);
-      //   me = me->prev;
-      // }
+  while (! NextStacks.empty()) {
+    size_t cur_stack = NextStacks.top(); NextStacks.pop();
+    if (Stacks[cur_stack] == NULL) continue;
 
-      expand(info, h, [info, &Goals, covered, prune_if_gt, &Stacks](hypothesis*next) mutable -> void {
-          //cout<<"  next: "; print_hypothesis(info, next);
+    float prune_if_gt = get_pruning_threshold(info, *(Stacks[cur_stack]));
+    recombine_stack(info, Stacks[cur_stack][0]);
+    
+    auto it = Stacks[cur_stack]->begin();
+    while (it != Stacks[cur_stack]->end()) {
+      hypothesis *h = *it;
+      if (h->cost > prune_if_gt) { it++; continue; }
+      if (h->skippable) { it++; continue; }
+
+      size_t diff = it - Stacks[cur_stack]->begin();
+      expand(info, h, [&](hypothesis* next) mutable -> void {
           if (is_final_hypothesis(info, next))
             Goals.push_back(next);
-          else if (next->cov_vec_count == covered) {
-            if ( next->cost <= prune_if_gt )
-              //Stacks[ covered ].push_back(next);
-              add_to_stack(info, Stacks[ covered ], next);
-          } else
-            Stacks[ next->cov_vec_count ].push_back(next);
-          //else
-          //  free_hypothesis(next);
+          else { // not final
+            size_t next_stack = get_stack_id(next);
+            if (next_stack == cur_stack)
+              add_to_stack(info, *Stacks[cur_stack], next);
+            else { // different stack
+              if (Stacks[next_stack] == NULL) {
+                Stacks[next_stack] = new vector<hypothesis*>();
+                NextStacks.push(next_stack);
+              }
+              Stacks[next_stack]->push_back(next);
+            }
+          }
         });
-      //cout<<endl;
-
-      visited.push_back(h);
+      it = Stacks[cur_stack]->begin() + diff;
+      it++;
     }
   }
 
-  visited.insert( visited.end(), Goals.begin(), Goals.end() );
+  for (auto it : Stacks) delete it.second;
+
   return { Goals, visited };
 }
 
@@ -743,7 +760,10 @@ bool is_unaligned(vector< vector<posn> > A, posn j) {
   return true;
 }
 
-void get_operation_sequence(vector< vector<lexeme> > E, vector<lexeme> f, vector< vector<posn> > A) {
+void get_operation_sequence(aligned_sentence_pair data) {
+  auto f = data.F;
+  auto E = data.E;
+  auto A = data.A;
   vector< pair<char, pair<lexeme,lexeme> > > op_seq;
   set<posn> gaps;
 
@@ -755,7 +775,6 @@ void get_operation_sequence(vector< vector<lexeme> > E, vector<lexeme> f, vector
 
   while ((j < f.size()) && is_unaligned(A, j)) {
     op_seq.push_back( { OP_GEN_S, { f[j], 0 } } );
-    //cout << "gen_s " << f[j] << endl;
     fcov[j] = true;
     j++;
   }
@@ -763,25 +782,30 @@ void get_operation_sequence(vector< vector<lexeme> > E, vector<lexeme> f, vector
 
   while (i < N) {
     j2 = A[i][k];
+    cout << "i=" << (uint32_t)i << " k=" << (uint32_t)k << " j2=" << (uint32_t)j2 << endl;
     if (j < j2) {
       if (! fcov[j]) {
-        op_seq.push_back( { OP_UNKNOWN, { j, 0 } } ); // "insert gap" -- need to fix later!
-        //cout << "insert gap1" << endl;
+        cout << "gap k=" << (uint32_t)k << " A.size=" << (uint32_t)A[i].size() << endl;
+        if ((k > 0) && (k < A[i].size()))
+          op_seq.push_back( { OP_CONT_G, { j, 0 } } );
+        else
+          op_seq.push_back( { OP_GAP, { j, 0 } } );
         gaps.insert(j);
       }
-      if (j == Z)
+      if (j == Z) 
         j = j2;
       else {
         op_seq.push_back( { OP_JUMP_E, { 0, 0 } } );
-        //cout << "jump end" << endl;
         j = Z;
       }
     }
 
     if (j2 < j) {
       if ((j < Z) && !fcov[j]) {
-        op_seq.push_back( { OP_UNKNOWN, { j, 0 } } ); // "insert gap" -- need to fix later!
-        //cout << "insert gap2" << endl;
+        if ((k > 0) && (k < A[i].size()))
+          op_seq.push_back( { OP_CONT_G, { j, 0 } } );
+        else
+          op_seq.push_back( { OP_GAP, { j, 0 } } );
         gaps.insert(j);
       }
 
@@ -796,22 +820,21 @@ void get_operation_sequence(vector< vector<lexeme> > E, vector<lexeme> f, vector
       assert(found);
       gaps.erase(A[i][k]);
       op_seq.push_back( { OP_JUMP_B, { W, 0 } } );
-      //cout << "jump back " << (uint32_t)W << endl;
       j = A[i][k];
     }
 
     if (j < j2) {
-      op_seq.push_back( { OP_UNKNOWN, { j, 0 } } ); // "insert gap" -- need to fix later!
-      //cout << "insert gap3" << endl;
+      if ((k > 0) && (k < A[i].size()))
+        op_seq.push_back( { OP_CONT_G, { j, 0 } } );
+      else
+        op_seq.push_back( { OP_GAP, { j, 0 } } );
       gaps.insert(j);
       j = j2;
     }
     if (k == 0) {
-      //cout << "generate " << (char)f[A[i][k]] << " from " << (uint32_t)i << endl;
       op_seq.push_back( { OP_GEN_ST, { i, k } } );
       fcov[j] = true;
     } else {
-      //cout << "continue " << (char)f[A[i][k]] << " from " << (uint32_t)i << endl;
       op_seq.push_back( { OP_CONT_W, { i, k } } );
       fcov[j] = true;
     }
@@ -819,8 +842,8 @@ void get_operation_sequence(vector< vector<lexeme> > E, vector<lexeme> f, vector
     k ++;
 
     while ((j < f.size()) && is_unaligned(A, j)) {
-      op_seq.push_back( { OP_GEN_S, { f[j], 0 } } );
-      //cout << "gen_s " << f[j] << endl;
+      bool in_gap = (k > 0) && (k < A[i].size());
+      op_seq.push_back( { OP_GEN_S, { f[j], in_gap } } );
       fcov[j] = true;
       j++;
     }
@@ -832,33 +855,281 @@ void get_operation_sequence(vector< vector<lexeme> > E, vector<lexeme> f, vector
     }
   }
   if (j < Z) {
-    //cout << "jump end" << endl;
     op_seq.push_back( { OP_JUMP_E, { 0, 0 } } );
     j = Z;
   }
 
   for (auto &op : op_seq)
     cout << "op=" << OP_NAMES[(uint32_t)op.first] << "\targ=(" << op.second.first << ", " << op.second.second << ")" << endl;
+}
 
-  // now, fix up the gaps (aka unknowns)
-  vector< pair<char, pair<lexeme,lexeme> > > ops;
-  for (size_t i=0; i<op_seq.size(); i++) {
-    if (op_seq[i].first != OP_UNKNOWN)
-      ops.push_back(op_seq[i]);
-    else {
-      assert(i+1 < op_seq.size());
-      assert(op_seq[i+1].first == OP_CONT_W);
-      op_seq[i+1].first = OP_CONT_G;
-    }
+template<class T>
+bool empty_intersection(set<T> bigger, set<T> smaller) {
+  auto e = bigger.end();
+  for (T x : smaller)
+    if (bigger.find(x) != e)
+      return false;
+  return true;
+}
+
+bool is_sorted(vector<posn> al) {
+  for (posn i=1; i<al.size(); i++)
+    if (al[i-1] > al[i])
+      return false;
+  return true;
+}
+
+// compare two MTUs completely ignoring gaps
+// returns -1 if lhs is smaller, +1 if rhs is smaller, 0 if they're equal
+int gapless_mtu_cmp(const mtu_item& lhs, const mtu_item& rhs) {
+  if (lhs.ident   < rhs.ident  ) return -1;
+  if (lhs.ident   > rhs.ident  ) return  1;
+
+  if (lhs.tgt_len < rhs.tgt_len) return -1;
+  if (lhs.tgt_len > rhs.tgt_len) return  1;
+
+  posn i,j;
+    
+  for (i=0; i<lhs.tgt_len; i++)
+    if      (lhs.tgt[i] < rhs.tgt[i]) return -1;
+    else if (lhs.tgt[i] > rhs.tgt[i]) return  1;
+
+  posn lhs_num_gaps = 0;
+  for (i=0; i<lhs.src_len; i++)
+    if (lhs.src[i] == GAP_LEX) lhs_num_gaps++;
+
+  posn rhs_num_gaps = 0;
+  for (i=0; i<rhs.src_len; i++)
+    if (rhs.src[i] == GAP_LEX) rhs_num_gaps++;
+
+  if (lhs.src_len - lhs_num_gaps < rhs.src_len - rhs_num_gaps) return -1;
+  if (lhs.src_len - lhs_num_gaps < rhs.src_len - rhs_num_gaps) return  1;
+
+  i = 0; j = 0;
+  while ((i < lhs.src_len) && (j < rhs.src_len)) {
+    while ((i < lhs.src_len) && (lhs.src[i] == GAP_LEX)) i++;
+    while ((j < rhs.src_len) && (rhs.src[j] == GAP_LEX)) j++;
+    if ((i >= lhs.src_len) || (j >= rhs.src_len)) break;
+    if (lhs.src[i] < rhs.src[j]) return -1;
+    if (lhs.src[i] > rhs.src[j]) return  1;
+    i++; j++;
+  }
+  return 0;
+}
+
+struct compare_mtu_up_to_gaps {
+  bool operator() (const mtu_item& lhs, const mtu_item& rhs) const{  // implements "<"
+    int cmp = gapless_mtu_cmp(lhs, rhs);
+    if (cmp < 0) return true;
+    if (cmp > 0) return false;
+
+    if (lhs.src_len < rhs.src_len) return true;
+    if (lhs.src_len > rhs.src_len) return false;
+
+    for (posn i=0; i<lhs.src_len; i++)
+      if      (lhs.src[i] < rhs.src[i]) return true;
+      else if (lhs.src[i] > rhs.src[i]) return false;
+
+    return false;
+  }
+};
+
+void print_mtu_half(lexeme*d, posn len) {
+  for (posn i=0; i<len; i++) {
+    if (i > 0) cout << ".";
+    if (d[i] == GAP_LEX)
+      cout << "_";
+    else
+      cout << d[i];
   }
 }
+
+void print_mtu_set(set<mtu_item> mtus) {
+  for (auto mtu : mtus) {
+    cout << mtu.ident << "\t";
+    print_mtu_half(mtu.src, mtu.src_len);
+    cout << "|";
+    print_mtu_half(mtu.tgt, mtu.tgt_len);
+    cout << endl;
+  }
+}
+
+set<mtu_item> coalesce_mtus(set<mtu_item,compare_mtu_up_to_gaps> cur_mtus) {
+  set<mtu_item> final_mtus;
+  size_t cur_ident = 0;
+  auto it = cur_mtus.begin();
+  while (it != cur_mtus.end()) {
+    // 'it' is at the start of a mtu clump (same src string, diff gaps)
+    // find the end
+    auto en = it; en++;
+    bool more_than_one = false;
+    while ((en != cur_mtus.end()) && (gapless_mtu_cmp(*it, *en) == 0)) {
+      en++;
+      more_than_one = true;
+    }
+
+    mtu_item mtu = *it;
+    mtu.ident = cur_ident;
+
+    if (more_than_one) {
+      vector<lexeme> src_no_gaps;
+      set<posn> valid_gaps;
+      for (posn i=0; i<mtu.src_len; i++)
+        if (mtu.src[i] != GAP_LEX)
+          src_no_gaps.push_back(mtu.src[i]);
+
+      for (auto me=it; me!=en; me++) {
+        mtu_item mtu2 = *me;
+        posn j = 0;
+        for (posn i=0; i<mtu2.src_len; i++)
+          if (mtu2.src[i] == GAP_LEX)
+            valid_gaps.insert(j);
+          else
+            j++;
+        assert(j == src_no_gaps.size());
+      }
+
+      if (src_no_gaps.size() + valid_gaps.size() > MAX_PHRASE_LEN) {
+        en = it;
+        en++;
+      } else {
+        posn j = 0;
+        for (posn i=0; i<src_no_gaps.size(); i++) {
+          if (valid_gaps.find(i) != valid_gaps.end()) {
+            mtu.src[j] = GAP_LEX;
+            j++;
+          }
+          mtu.src[j] = src_no_gaps[i];
+          j++;
+        }
+        mtu.src_len = j;
+      }
+    }
+    final_mtus.insert(mtu);
+
+    cur_ident++;
+
+    it = en;
+  }
+
+  return final_mtus;
+}
+
+void collect_mtus(aligned_sentence_pair spair, set<mtu_item,compare_mtu_up_to_gaps> &cur_mtus, size_t &skipped_for_len, size_t &skipped_for_gaps) {
+  auto E = spair.E;
+  auto F = spair.F;
+  auto A = spair.A;
+
+  //cout << "F ="; for (auto j : F) cout << " " << (uint32_t)j; cout << endl;
+
+  assert(E.size() == A.size());
+  for (posn i=0; i<E.size(); i++) {
+    vector<posn> al = A[i];
+    vector<lexeme> ephr = E[i];
+
+    //cout << "al ="; for (auto j : al) cout << " " << (uint32_t)j; cout << endl;
+
+    assert(is_sorted(al));
+
+    if (ephr.size() > MAX_PHRASE_LEN) { skipped_for_len++; continue; }
+
+    mtu_item mtu;
+    memset(&mtu, 0, sizeof(mtu));
+    mtu.tgt_len = ephr.size();
+    for (posn j=0; j<ephr.size(); j++)
+      mtu.tgt[j] = ephr[j];
+
+    posn num_gaps = 0;
+    for (posn j=1; j<al.size(); j++)
+      if (al[j] != al[j-1]+1)
+        num_gaps++;
+
+    if (num_gaps > MAX_GAPS) { skipped_for_gaps++; continue; }
+    if (al.size() + num_gaps > MAX_PHRASE_LEN) { skipped_for_len++; continue; }
+
+    mtu.src_len = al.size() + num_gaps;
+    posn k = 0;
+    for (posn j=0; j<al.size(); j++) {
+      if ((j > 0) && (al[j] != al[j-1]+1)) {
+        mtu.src[k] = GAP_LEX;
+        k++;
+      }
+      mtu.src[k] = F[al[j]];
+      k++;
+    }
+
+    mtu.ident = 0;
+    
+    cur_mtus.insert(mtu);
+  }
+}
+
+aligned_sentence_pair read_next_aligned_sentence(FILE *fd) {
+  assert(! feof(fd));
+
+  lexeme cnt, w,x;
+  size_t nr;
+
+  nr = fscanf(fd, "%d", &cnt);
+  assert(cnt <= MAX_SENTENCE_LENGTH);
+  vector<lexeme> F(cnt);
+  for (posn i=0; i<cnt; i++) nr = fscanf(fd, " %d", &F[i]);
+
+  nr = fscanf(fd, "\t%d", &cnt);
+  assert(cnt <= MAX_SENTENCE_LENGTH);
+  vector<lexeme> e(cnt);
+  for (posn i=0; i<cnt; i++) nr = fscanf(fd, " %d", &e[i]);
+
+  nr = fscanf(fd, "\t%d", &cnt);
+  vector< set<posn> > al;  // maps from english id to (set of) french ids
+  for (posn i=0; i<e.size(); i++)
+    al.push_back(set<posn>());
+  for (posn i=0; i<cnt; i++) {
+    nr = fscanf(fd, " %d-%d", &w, &x);
+    //cout << "aligning e=" << (uint32_t)x << " to f=" << (uint32_t)w << endl;
+    al[x].insert(w);
+  }
+  nr = fscanf(fd, "\n");
+
+  vector< vector<lexeme> > E;
+  vector< vector<posn> > A;
+
+  posn i = 0;
+  while (i < e.size()) {
+    // the english phrase starts at i -- find it's end
+    set<posn> curF;
+    curF.insert( al[i].begin(), al[i].end() );    // all french ids to which this phrase is aligned
+    //cout << "i=" << (uint32_t)i << " curF="; for (auto p : curF) cout << " " << (uint32_t)p; cout << endl;
+    vector<lexeme> thisP;
+    thisP.push_back(e[i]);
+    posn j = i + 1;
+    while (j < e.size()) {
+      if (empty_intersection(curF, al[j]))
+        break;
+      curF.insert( al[j].begin(), al[j].end() );
+      thisP.push_back(e[j]);
+      j++;
+    }
+    
+    E.push_back(thisP);
+    A.push_back(vector<posn>( curF.begin(), curF.end() ));
+    i = j;
+  }
+
+  //cout << "F ="; for (auto f : F) cout << " " << (uint32_t)f; cout << endl;
+  //cout << "E ="; for (auto vec : E) { for (auto w : vec) cout << " " << w; cout << " |"; } cout << endl;
+  //cout << "A ="; for (auto vec : A) { for (auto p : vec) cout << " " << (uint32_t)p; cout << " |"; } cout << endl;
+
+  return { F, E, A };
+}
+
 
 void test_align() {
   vector< lexeme >         F = { 'D', 'H', 'E', 'I', 'B', 'G' };
   vector< vector<lexeme> > E = { { 't' }, { 'h' }, { 'r' }, { 'a' }, { 'b' } };
   vector< vector<posn  > > A = { { 0 }, { 2 }, { 1, 5 }, { 3 }, { 4 } };
 
-  get_operation_sequence(E, F, A);
+  get_operation_sequence( {F, E, A} );
 }
 
 void test_decode() {
@@ -870,7 +1141,7 @@ void test_decode() {
   mtu_add_item_string(&dict, 4, "B_C", "bc");
   mtu_add_item_string(&dict, 5, "C" , "c");
 
-  translation_info info((char*)"file.arpa-bin");
+  translation_info info;
   info.N       = 6;
   info.sent[0] = (uint32_t)'A';
   info.sent[1] = (uint32_t)'B';
@@ -880,6 +1151,7 @@ void test_decode() {
   info.sent[5] = (uint32_t)'C';
   build_sentence_mtus(&info, dict);
   info.compute_cost = simple_compute_cost;
+  info.language_model = NULL; // new lm::ngram::Model((char*)"file.arpa-bin");
 
   info.operation_allowed =
     (1 << OP_INIT  ) |
@@ -904,7 +1176,12 @@ void test_decode() {
     cerr<<".";
     info.hyp_ring = initialize_hypothesis_ring(INIT_HYPOTHESIS_RING_SIZE);
 
-    pair< vector<hypothesis*>, vector<hypothesis*> > GoalsVisited = stack_covlen_search(&info);
+    pair< vector<hypothesis*>, vector<hypothesis*> > GoalsVisited = 
+      // for search based on amount of coverage
+      // stack_generic_search(&info, [](hypothesis* hyp) { return (size_t)hyp->cov_vec_count; }, info.N*2);
+      // for search based on (hash of) coverage vector
+      stack_generic_search(&info, [](hypothesis* hyp) { return (size_t)hyp->cov_vec_hash; }, info.N*100);
+
 
 
     for (auto &hyp : GoalsVisited.first) {
@@ -925,6 +1202,7 @@ void test_decode() {
     free_hypothesis_ring(info.hyp_ring);
   }
   cerr<<endl;
+  if (info.language_model != NULL) delete info.language_model;
   delete info.recomb_buckets;
   free_sentence_mtus(info.mtus_at);
   free_dict(dict);
@@ -943,70 +1221,33 @@ void test_lm() {
 
 int main(int argc, char*argv[]) {
   //test_align();
-  test_decode();
+  //test_decode();
   //test_lm();
+
+  FILE *fd = fopen("test/test.ngdec", "r");
+  size_t sent_id = 0;
+  set<mtu_item, compare_mtu_up_to_gaps> cur_mtus;
+  size_t skipped_for_len = 0, skipped_for_gaps = 0;
+  while (!feof(fd)) {
+    cerr << ".";
+    sent_id++;
+    //cout << "sentence pair " << sent_id << endl;
+    aligned_sentence_pair spair = read_next_aligned_sentence(fd);
+    //get_operation_sequence(spair);
+    collect_mtus(spair, cur_mtus, skipped_for_len, skipped_for_gaps);
+    //cout << endl;
+  }
+  fclose(fd);
+  cerr << endl;
+
+  cout << "collected " << cur_mtus.size() << " mtus" << endl;
+  cout << "skipped " << skipped_for_len << " for length, " << skipped_for_gaps << " for gaps" << endl;
+
+  set<mtu_item> final_mtus = coalesce_mtus(cur_mtus);
+
+  cout << "coalesced down to " << final_mtus.size() << " mtus" << endl;
+  print_mtu_set(final_mtus);
+
   return 0;
 }
-
-/*
-KENLM:
-  after running ./compile_query_only.sh
-  create an archive:
-    ar rvs kenlm.a util/double-conversion/bignum.o util/double-conversion/bignum-dtoa.o util/double-conversion/cached-powers.o util/double-conversion/diy-fp.o util/double-conversion/double-conversion.o util/double-conversion/fast-dtoa.o util/double-conversion/fixed-dtoa.o util/double-conversion/strtod.o util/bit_packing.o util/ersatz_progress.o util/exception.o util/file.o util/file_piece.o util/mmap.o util/murmur_hash.o util/pool.o util/read_compressed.o util/scoped.o util/string_piece.o util/usage.o lm/bhiksha.o lm/binary_format.o lm/config.o lm/lm_exception.o lm/model.o lm/quantize.o lm/read_arpa.o lm/search_hashed.o lm/search_trie.o lm/sizes.o lm/trie.o lm/trie_sort.o lm/value_build.o lm/virtual_interface.o lm/vocab.o
-  copy it to the ngdec directory
-*/
-
-/*
-with expand creating a temporary list, and using bitset
-
-time ./ngdec  > /dev/null   (1000 reps)
-
-real	3m55.024s
-
-switch to vector<bool>
-real	4m36.946s
-
-switch to bitset<MAX_SENTENCE_LENGTH>
-real	4m5.635s
-
-switch to functional expand
-real	4m5.045s
-
-fixing "gap doesn't consume a position" bug
-real	3m50.487s
-
-adding SKIP GAP
-real	3m57.525s
-
-(switch to 200 reps)
-real	0m48.737s
-
-refactoring skip/gap
-real	0m48.483s
-
-added ngram contexts
-real	0m53.590s
-
-added hypothesis ring (1024)
-real	0m43.693s
-
-growable hypothesis ring
-real	0m43.438s
-
-added history and hashes for covvec and lm and tm
-real	1m15.180s
-
-added hypothesis recombination (5g LM, 9g TM)
-real	0m3.510s
-
-checking recombination on insertion into current stack
-real	0m3.158s
-
-switched to kenlm
-real	0m1.992s
-
-back to 1000, a bit more allocating at the front (tm_context)
-real	0m10.340s
-
-*/
   
