@@ -12,6 +12,14 @@ namespace ng=lm::ngram;
 
 #define MAX(a,b) (((a)>(b))?(a):(b))
 
+namespace std {
+  template <> struct hash<mtu_item> : public unary_function<mtu_item, size_t> {
+    size_t operator()(const mtu_item& v) const {
+      return util::MurmurHashNative(&v, sizeof(mtu_item));
+    }
+  };
+}
+
 void print_coverage(bitset<MAX_SENTENCE_LENGTH> cov, posn N, posn cursor) {
   for (posn i=0; i<N; i++) {
     if (cov[i])
@@ -21,23 +29,6 @@ void print_coverage(bitset<MAX_SENTENCE_LENGTH> cov, posn N, posn cursor) {
     else
       cout << ".";
   }
-}
-
-void print_mtu(const mtu_item*mtu) {
-  if (mtu == NULL)
-    cout << "?";
-  else
-    for (uint32_t m=0; m<mtu->tgt_len; m++)
-      cout << (char)mtu->tgt[m];
-}
-
-void print_mtus(vector<const mtu_item*> mtus) {
-  for (auto it = mtus.begin(); it != mtus.end(); it++) {
-    if (it != mtus.begin())
-      cout << " ";
-    print_mtu(*it);
-  }
-  cout << "\n";
 }
 
 posn get_translation_length(hypothesis *h) {
@@ -198,6 +189,7 @@ hypothesis* next_hypothesis(translation_info*info, hypothesis *h) {
   return h2;
 }
 
+/*
 void print_hypothesis(translation_info* info, hypothesis *h) {
   cout << h;
   cout << "\tlast_op="<<OP_NAMES[(size_t)h->last_op];
@@ -213,6 +205,7 @@ void print_hypothesis(translation_info* info, hypothesis *h) {
   cout << "\tprev="<<h->prev;
   cout << endl;
 }
+*/
 
 void free_sentence_mtus(vector< vector<mtu_for_sent*> > sent_mtus) {
   for (auto &it1 : sent_mtus)
@@ -228,8 +221,8 @@ void build_sentence_mtus(translation_info *info, mtu_item_dict dict) {
     auto dict_entry = dict.find(info->sent[n]);
     if (dict_entry == dict.end()) continue;
 
-    vector<mtu_item*> *mtus = dict_entry->second;
-    for (auto mtu_iter=mtus->begin(); mtu_iter!=mtus->end(); mtu_iter++) {
+    vector<mtu_item*> mtus = dict_entry->second;
+    for (auto mtu_iter=mtus.begin(); mtu_iter!=mtus.end(); mtu_iter++) {
       mtu_for_sent* mtu = (mtu_for_sent*)calloc(1, sizeof(mtu_for_sent));
       mtu->mtu = *mtu_iter;
 
@@ -241,24 +234,20 @@ void build_sentence_mtus(translation_info *info, mtu_item_dict dict) {
       posn last_position = n;
       bool success = true;
       for (posn i=1; i<mtu->mtu->src_len; i++) {
-        if (mtu->mtu->src[i] == GAP_LEX) {
-          last_position++;
-        } else {
-          posn num_found = 0;
-          for (posn n2=last_position; n2<N; n2++) {
-            if (info->sent[n2] == mtu->mtu->src[i]) {
-              mtu->found_at[i][num_found] = n2;
-              num_found++;
-              if (num_found > NUM_MTU_OPTS)
-                break;
-            }
+        posn num_found = 0;
+        for (posn n2=last_position; n2<N; n2++) {
+          if (info->sent[n2] == mtu->mtu->src[i]) {
+            mtu->found_at[i][num_found] = n2;
+            num_found++;
+            if (num_found > NUM_MTU_OPTS)
+              break;
           }
-          if (num_found == 0) {
-            success = false;
-            break;
-          }
-          last_position = mtu->found_at[i][0];
         }
+        if (num_found == 0) {
+          success = false;
+          break;
+        }
+        last_position = mtu->found_at[i][0];
       }
 
       if (success) {
@@ -290,8 +279,6 @@ bool is_ok_lex_position(translation_info *info, hypothesis* h, posn n, size_t i,
         bool found = false;
         for (size_t j=0; j<NUM_MTU_OPTS; j++) {
           posn there = mtu->found_at[q_ptr][i];
-          if (mtu->mtu->src[q_ptr] == GAP_LEX)
-            continue;
           if (there > MAX_SENTENCE_LENGTH)
             break;
           if ((there > min_pos)  && (! is_covered(h, there))) {
@@ -381,6 +368,16 @@ float shift_lm_context(translation_info* info, hypothesis *h, posn M, lexeme*tgt
   return log_prob;
 }
 
+bool is_gap_option(gap_op_t gap_option, posn i) {
+  if ((i < 0) || (i >= 31)) return false;
+  return (gap_option & (1 << i)) != 0;
+}
+
+void set_gap_option(gap_op_t &gap_option, posn i) {
+  if ((i < 0) || (i >= 31)) return;
+  gap_option |= (1 << i);
+}
+
 void expand(translation_info *info, hypothesis *h, function<void(hypothesis*)> add_operation) {
 
   // first check to see if the queue is empty
@@ -398,7 +395,8 @@ void expand(translation_info *info, hypothesis *h, function<void(hypothesis*)> a
     if (n < N && !is_covered(h, n)) {
       mtu_item *mtu = h->cur_mtu->mtu;
       lexeme lex = mtu->src[ h->queue_head ];
-      if (lex != GAP_LEX) {  // this is not a GAP
+
+      if (! is_gap_option(h->cur_mtu->mtu->gap_option, h->queue_head) ) {  // no GAP option
         if (info->sent[n] == lex) {
           hypothesis *h2 = next_hypothesis(info, h);
           h2->last_op = OP_CONT_W;
@@ -407,10 +405,9 @@ void expand(translation_info *info, hypothesis *h, function<void(hypothesis*)> a
           h2->n++;
           if (prepare_for_add(info, h2)) add_operation(h2);
         }
-      } else {
+      } else { // we can have a gap BEFORE the current word (== h->queue_head)
         for (size_t idx=0; idx<NUM_MTU_OPTS; idx++) {
-          posn here = h->cur_mtu->found_at[h->queue_head+1][idx];
-          lex = mtu->src[ h->queue_head+1 ]; // now this is the NEXT word
+          posn here = h->cur_mtu->found_at[h->queue_head][idx];
 
           bool okay_for_gap = is_ok_lex_position(info, h, n+1, idx, here);
           bool okay_for_skip = okay_for_gap;
@@ -427,7 +424,7 @@ void expand(translation_info *info, hypothesis *h, function<void(hypothesis*)> a
               h2->gaps_alloc = true;
             }
             h2->gaps->insert(h->n);
-            h2->queue_head += 2;
+            h2->queue_head ++;
             h2->n = here;
             set_covered(h2, here);
             h2->n++;
@@ -706,26 +703,21 @@ pair< vector<hypothesis*>, vector<hypothesis*> > stack_search(translation_info *
 }
 
 
-void mtu_add_unit(mtu_item_dict*dict, mtu_item*mtu) {
-  auto it = dict->find(mtu->src[0]);
-  if (it == dict->end()) {
-    vector<mtu_item*> * mtus = new vector<mtu_item*>;
-    mtus->push_back(mtu);
-    dict->insert( { mtu->src[0], mtus } );
-  } else {
-    vector<mtu_item*> * mtus = it->second;
-    mtus->push_back(mtu);
-  }
+void mtu_add_unit(mtu_item_dict &dict, mtu_item*mtu) {
+  dict[mtu->src[0]].push_back(mtu);
 }
 
-void mtu_add_item_string(mtu_item_dict*dict, mtuid ident, string src, string tgt) {
+void mtu_add_item_string(mtu_item_dict &dict, mtuid ident, string src, string tgt) {
   mtu_item *mtu = (mtu_item*)calloc(1, sizeof(mtu_item));
   mtu->src_len = src.length();
+  posn j = 0;
   for (uint32_t n=0; n<mtu->src_len; n++) {
     if (src[n] == '_')
-      mtu->src[n] = GAP_LEX;
-    else
-      mtu->src[n] = (uint32_t)src[n];
+      set_gap_option(mtu->gap_option, j);
+    else {
+      mtu->src[j] = (uint32_t)src[n];
+      j++;
+    }
   }
 
   mtu->tgt_len = tgt.length();
@@ -740,10 +732,9 @@ void mtu_add_item_string(mtu_item_dict*dict, mtuid ident, string src, string tgt
 
 void free_dict(mtu_item_dict dict) {
   for (auto it=dict.begin(); it!=dict.end(); it++) {
-    vector<mtu_item*> *mtus = (*it).second;
-    for (auto mtu_it=mtus->begin(); mtu_it!=mtus->end(); mtu_it++)
+    vector<mtu_item*> mtus = (*it).second;
+    for (auto mtu_it=mtus.begin(); mtu_it!=mtus.end(); mtu_it++)
       free(*mtu_it);
-    delete mtus;
   }
 }
 
@@ -879,143 +870,82 @@ bool is_sorted(vector<posn> al) {
   return true;
 }
 
-// compare two MTUs completely ignoring gaps
-// returns -1 if lhs is smaller, +1 if rhs is smaller, 0 if they're equal
-int gapless_mtu_cmp(const mtu_item& lhs, const mtu_item& rhs) {
-  if (lhs.ident   < rhs.ident  ) return -1;
-  if (lhs.ident   > rhs.ident  ) return  1;
-
-  if (lhs.tgt_len < rhs.tgt_len) return -1;
-  if (lhs.tgt_len > rhs.tgt_len) return  1;
-
-  posn i,j;
-    
-  for (i=0; i<lhs.tgt_len; i++)
-    if      (lhs.tgt[i] < rhs.tgt[i]) return -1;
-    else if (lhs.tgt[i] > rhs.tgt[i]) return  1;
-
-  posn lhs_num_gaps = 0;
-  for (i=0; i<lhs.src_len; i++)
-    if (lhs.src[i] == GAP_LEX) lhs_num_gaps++;
-
-  posn rhs_num_gaps = 0;
-  for (i=0; i<rhs.src_len; i++)
-    if (rhs.src[i] == GAP_LEX) rhs_num_gaps++;
-
-  if (lhs.src_len - lhs_num_gaps < rhs.src_len - rhs_num_gaps) return -1;
-  if (lhs.src_len - lhs_num_gaps < rhs.src_len - rhs_num_gaps) return  1;
-
-  i = 0; j = 0;
-  while ((i < lhs.src_len) && (j < rhs.src_len)) {
-    while ((i < lhs.src_len) && (lhs.src[i] == GAP_LEX)) i++;
-    while ((j < rhs.src_len) && (rhs.src[j] == GAP_LEX)) j++;
-    if ((i >= lhs.src_len) || (j >= rhs.src_len)) break;
-    if (lhs.src[i] < rhs.src[j]) return -1;
-    if (lhs.src[i] > rhs.src[j]) return  1;
-    i++; j++;
-  }
-  return 0;
-}
-
-struct compare_mtu_up_to_gaps {
-  bool operator() (const mtu_item& lhs, const mtu_item& rhs) const{  // implements "<"
-    int cmp = gapless_mtu_cmp(lhs, rhs);
-    if (cmp < 0) return true;
-    if (cmp > 0) return false;
-
-    if (lhs.src_len < rhs.src_len) return true;
-    if (lhs.src_len > rhs.src_len) return false;
-
-    for (posn i=0; i<lhs.src_len; i++)
-      if      (lhs.src[i] < rhs.src[i]) return true;
-      else if (lhs.src[i] > rhs.src[i]) return false;
-
-    return false;
-  }
-};
-
-void print_mtu_half(lexeme*d, posn len) {
+void print_mtu_half(const lexeme*d, posn len, gap_op_t gap_option=0) {
   for (posn i=0; i<len; i++) {
-    if (i > 0) cout << ".";
-    if (d[i] == GAP_LEX)
-      cout << "_";
-    else
-      cout << d[i];
+    if (i > 0) cout << " ";
+    cout << d[i];
+    if (is_gap_option(gap_option, i))
+        cout << " _";
   }
 }
 
-void print_mtu_set(set<mtu_item> mtus) {
-  for (auto mtu : mtus) {
-    cout << mtu.ident << "\t";
-    print_mtu_half(mtu.src, mtu.src_len);
-    cout << "|";
-    print_mtu_half(mtu.tgt, mtu.tgt_len);
+void print_mtu_set(unordered_map<mtu_item,uint32_t> mtus, bool renumber_mtus=false) {
+  size_t id = 0;
+  for (auto mtu_gap : mtus) {
+    if (renumber_mtus) {
+      cout << id << "\t";
+      id++;
+    } else
+      cout << mtu_gap.first.ident << "\t";
+
+    print_mtu_half(mtu_gap.first.src, mtu_gap.first.src_len, mtu_gap.second);
+    cout << " | ";
+    print_mtu_half(mtu_gap.first.tgt, mtu_gap.first.tgt_len);
     cout << endl;
   }
 }
 
-set<mtu_item> coalesce_mtus(set<mtu_item,compare_mtu_up_to_gaps> cur_mtus) {
-  set<mtu_item> final_mtus;
-  size_t cur_ident = 0;
-  auto it = cur_mtus.begin();
-  while (it != cur_mtus.end()) {
-    // 'it' is at the start of a mtu clump (same src string, diff gaps)
-    // find the end
-    auto en = it; en++;
-    bool more_than_one = false;
-    while ((en != cur_mtus.end()) && (gapless_mtu_cmp(*it, *en) == 0)) {
-      en++;
-      more_than_one = true;
-    }
 
-    mtu_item mtu = *it;
-    mtu.ident = cur_ident;
+bool read_mtu_item_from_file(FILE* fd, mtu_item& mtu) {
+  char line[255];
+  size_t nr;
 
-    if (more_than_one) {
-      vector<lexeme> src_no_gaps;
-      set<posn> valid_gaps;
-      for (posn i=0; i<mtu.src_len; i++)
-        if (mtu.src[i] != GAP_LEX)
-          src_no_gaps.push_back(mtu.src[i]);
-
-      for (auto me=it; me!=en; me++) {
-        mtu_item mtu2 = *me;
-        posn j = 0;
-        for (posn i=0; i<mtu2.src_len; i++)
-          if (mtu2.src[i] == GAP_LEX)
-            valid_gaps.insert(j);
-          else
-            j++;
-        assert(j == src_no_gaps.size());
-      }
-
-      if (src_no_gaps.size() + valid_gaps.size() > MAX_PHRASE_LEN) {
-        en = it;
-        en++;
-      } else {
-        posn j = 0;
-        for (posn i=0; i<src_no_gaps.size(); i++) {
-          if (valid_gaps.find(i) != valid_gaps.end()) {
-            mtu.src[j] = GAP_LEX;
-            j++;
-          }
-          mtu.src[j] = src_no_gaps[i];
-          j++;
-        }
-        mtu.src_len = j;
-      }
-    }
-    final_mtus.insert(mtu);
-
-    cur_ident++;
-
-    it = en;
+  nr = fscanf(fd, "%d\t", &mtu.ident);
+  //cerr<<"ident="<<mtu.ident<<", nr="<<nr<<endl;
+  if ((nr == 0) || (feof(fd))) return true;
+  mtu.gap_option = 0;
+  posn i=0;
+  while (true) {
+    nr = fscanf(fd, "%[^| ] ", line);
+    //cerr << "first: line='"<<line<<"', nr="<<nr<<", gap_option="<<mtu.gap_option<<endl;
+    if (nr == 0) break;
+    if ((line[0] == '_') && (line[1] == 0))
+      set_gap_option(mtu.gap_option, i-1);
+    else
+      mtu.src[i++] = atoi(line);
   }
+  mtu.src_len = i;
+  if (feof(fd)) return true;
+  nr = fscanf(fd, "|");
+  if (feof(fd)) return true;
 
-  return final_mtus;
+  i=0;
+  while (true) {
+    nr = fscanf(fd, "%d%[ \n]", &mtu.tgt[i], line);
+    //cerr<<"tgt["<<i<<"]="<<mtu.tgt[i]<<", nr="<<nr<<endl;
+    i++;
+    if ((line[0]=='\n') || (nr < 2) || (feof(fd))) break;
+  }
+  mtu.tgt_len = i;
+  if (i == 0) return true;
+
+  return false;
 }
 
-void collect_mtus(aligned_sentence_pair spair, set<mtu_item,compare_mtu_up_to_gaps> &cur_mtus, size_t &skipped_for_len, size_t &skipped_for_gaps) {
+mtu_item_dict read_mtu_item_dict(FILE *fd) {
+  mtu_item_dict dict;
+  bool done = false;
+  while (! done) {
+    mtu_item * mtu = (mtu_item*) calloc(1, sizeof(mtu_item));
+    done = read_mtu_item_from_file(fd, *mtu);
+    if (!done) 
+      mtu_add_unit(dict, mtu);
+  }
+  return dict;
+}
+
+
+void collect_mtus(aligned_sentence_pair spair, unordered_map< mtu_item, uint32_t > &cur_mtus, size_t &skipped_for_len) {
   auto E = spair.E;
   auto F = spair.F;
   auto A = spair.A;
@@ -1039,28 +969,25 @@ void collect_mtus(aligned_sentence_pair spair, set<mtu_item,compare_mtu_up_to_ga
     for (posn j=0; j<ephr.size(); j++)
       mtu.tgt[j] = ephr[j];
 
-    posn num_gaps = 0;
-    for (posn j=1; j<al.size(); j++)
-      if (al[j] != al[j-1]+1)
-        num_gaps++;
+    if (al.size() > MAX_PHRASE_LEN) { skipped_for_len++; continue; }
 
-    if (num_gaps > MAX_GAPS) { skipped_for_gaps++; continue; }
-    if (al.size() + num_gaps > MAX_PHRASE_LEN) { skipped_for_len++; continue; }
-
-    mtu.src_len = al.size() + num_gaps;
-    posn k = 0;
+    mtu.src_len = al.size();
+    uint32_t my_gaps = 0;
     for (posn j=0; j<al.size(); j++) {
-      if ((j > 0) && (al[j] != al[j-1]+1)) {
-        mtu.src[k] = GAP_LEX;
-        k++;
-      }
-      mtu.src[k] = F[al[j]];
-      k++;
-    }
+      mtu.src[j] = F[al[j]];
 
+      if ((j < al.size()-1) && (al[j] != al[j+1]-1))
+        set_gap_option(my_gaps, j);
+    }
     mtu.ident = 0;
     
-    cur_mtus.insert(mtu);
+    auto it = cur_mtus.find(mtu);
+    if (it == cur_mtus.end())
+      cur_mtus.insert( { mtu, my_gaps } );
+    else {
+      uint32_t& old_val = cur_mtus[mtu];
+      old_val |= my_gaps;
+    }
   }
 }
 
@@ -1086,7 +1013,6 @@ aligned_sentence_pair read_next_aligned_sentence(FILE *fd) {
     al.push_back(set<posn>());
   for (posn i=0; i<cnt; i++) {
     nr = fscanf(fd, " %d-%d", &w, &x);
-    //cout << "aligning e=" << (uint32_t)x << " to f=" << (uint32_t)w << endl;
     al[x].insert(w);
   }
   nr = fscanf(fd, "\n");
@@ -1099,7 +1025,6 @@ aligned_sentence_pair read_next_aligned_sentence(FILE *fd) {
     // the english phrase starts at i -- find it's end
     set<posn> curF;
     curF.insert( al[i].begin(), al[i].end() );    // all french ids to which this phrase is aligned
-    //cout << "i=" << (uint32_t)i << " curF="; for (auto p : curF) cout << " " << (uint32_t)p; cout << endl;
     vector<lexeme> thisP;
     thisP.push_back(e[i]);
     posn j = i + 1;
@@ -1134,12 +1059,12 @@ void test_align() {
 
 void test_decode() {
   mtu_item_dict dict;
-  mtu_add_item_string(&dict, 0, "A_B", "ab");
-  mtu_add_item_string(&dict, 1, "A_C", "ac");
-  mtu_add_item_string(&dict, 2, "A" , "a");
-  mtu_add_item_string(&dict, 3, "B" , "b");
-  mtu_add_item_string(&dict, 4, "B_C", "bc");
-  mtu_add_item_string(&dict, 5, "C" , "c");
+  mtu_add_item_string(dict, 0, "A_B", "ab");
+  mtu_add_item_string(dict, 1, "A_C", "ac");
+  mtu_add_item_string(dict, 2, "A" , "a");
+  mtu_add_item_string(dict, 3, "B" , "b");
+  mtu_add_item_string(dict, 4, "B_C", "bc");
+  mtu_add_item_string(dict, 5, "C" , "c");
 
   translation_info info;
   info.N       = 6;
@@ -1172,15 +1097,15 @@ void test_decode() {
 
   info.recomb_buckets = new recombination_data(10231);
 
-  for (size_t rep = 0; rep < 1 + 1*999; rep++) {
+  for (size_t rep = 0; rep < 1 + 0*999; rep++) {
     cerr<<".";
     info.hyp_ring = initialize_hypothesis_ring(INIT_HYPOTHESIS_RING_SIZE);
 
     pair< vector<hypothesis*>, vector<hypothesis*> > GoalsVisited = 
       // for search based on amount of coverage
-      // stack_generic_search(&info, [](hypothesis* hyp) { return (size_t)hyp->cov_vec_count; }, info.N*2);
+      stack_generic_search(&info, [](hypothesis* hyp) { return (size_t)hyp->cov_vec_count; }, info.N*2);
       // for search based on (hash of) coverage vector
-      stack_generic_search(&info, [](hypothesis* hyp) { return (size_t)hyp->cov_vec_hash; }, info.N*100);
+      //stack_generic_search(&info, [](hypothesis* hyp) { return (size_t)hyp->cov_vec_hash; }, info.N*100);
 
 
 
@@ -1191,12 +1116,6 @@ void test_decode() {
       for (auto &w : get_translation(&info, hyp))
         cout<<" "<<(char)w;
       cout<<endl;
-      // hypothesis *me = hyp;
-      // while (me != NULL) {
-      //   cout<<"\t"; print_hypothesis(info, me);
-      //   me = me->prev;
-      // }
-      // cout<<endl; 
     }
 
     free_hypothesis_ring(info.hyp_ring);
@@ -1219,35 +1138,48 @@ void test_lm() {
   }
 }
 
+void main_collect_mtus(char* filename) {
+  FILE *fd = fopen(filename, "r");
+  assert(fd != 0);
+
+  size_t sent_id = 0;
+  size_t next_print = 100;
+  unordered_map<mtu_item, gap_op_t > cur_mtus;
+  size_t skipped_for_len = 0;
+  while (!feof(fd)) {
+    sent_id++;
+    if (sent_id == next_print) {
+      cerr << "reading sentence pair " << sent_id << endl;
+      next_print *= 2;
+    }
+
+    aligned_sentence_pair spair = read_next_aligned_sentence(fd);
+    collect_mtus(spair, cur_mtus, skipped_for_len);
+  }
+  fclose(fd);
+
+  cerr << "collected " << cur_mtus.size() << " mtus" << endl;
+  cerr << "skipped " << skipped_for_len << " for length" << endl;
+
+  print_mtu_set(cur_mtus, true);
+}
+
 int main(int argc, char*argv[]) {
   //test_align();
   //test_decode();
   //test_lm();
-
-  FILE *fd = fopen("test/test.ngdec", "r");
-  size_t sent_id = 0;
-  set<mtu_item, compare_mtu_up_to_gaps> cur_mtus;
-  size_t skipped_for_len = 0, skipped_for_gaps = 0;
-  while (!feof(fd)) {
-    cerr << ".";
-    sent_id++;
-    //cout << "sentence pair " << sent_id << endl;
-    aligned_sentence_pair spair = read_next_aligned_sentence(fd);
-    //get_operation_sequence(spair);
-    collect_mtus(spair, cur_mtus, skipped_for_len, skipped_for_gaps);
-    //cout << endl;
-  }
+  //main_collect_mtus(argv[1]);
+  FILE *fd = fopen("test/test.ngdec.mtus", "r");
+  mtu_item_dict dict = read_mtu_item_dict(fd);
   fclose(fd);
-  cerr << endl;
-
-  cout << "collected " << cur_mtus.size() << " mtus" << endl;
-  cout << "skipped " << skipped_for_len << " for length, " << skipped_for_gaps << " for gaps" << endl;
-
-  set<mtu_item> final_mtus = coalesce_mtus(cur_mtus);
-
-  cout << "coalesced down to " << final_mtus.size() << " mtus" << endl;
-  print_mtu_set(final_mtus);
-
-  return 0;
+  
+  fd = fopen("test/test.ngdec", "r");
+  while (!feof(fd)) {
+    aligned_sentence_pair spair = read_next_aligned_sentence(fd);
+    get_operation_sequence( spair );
+  }
+  
+  //print_mtu_set(dict, false);
 }
+
   

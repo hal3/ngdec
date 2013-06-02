@@ -13,7 +13,7 @@ using namespace std;
 
 #define INIT_HYPOTHESIS_RING_SIZE 1024
 
-#define MAX_PHRASE_LEN   10
+#define MAX_PHRASE_LEN   5
 #define MAX_GAPS         5
 #define MAX_SENTENCE_LENGTH 200
 #define NUM_MTU_OPTS     5
@@ -39,9 +39,11 @@ string OP_NAMES[OP_MAXIMUM] = { "unknown", "init", "gen_st", "cont_w", "cont_g",
 typedef unsigned char posn;   // should be large enough to store MAX_SENTENCE_LENGTH
 typedef lm::WordIndex lexeme;
 typedef uint32_t mtuid;
+typedef uint32_t gap_op_t;
 
-lexeme GAP_LEX = lm::kMaxWordIndex;
-lexeme BOS_LEX = (lexeme)0;
+lexeme UNK_LEX = (lexeme)0; // this "seems" to be the kenlm standard
+lexeme BOS_LEX = (lexeme)1;
+lexeme EOS_LEX = (lexeme)2;
 
 struct mtu_item {
   posn src_len;
@@ -50,9 +52,25 @@ struct mtu_item {
   lexeme src[MAX_PHRASE_LEN];
   lexeme tgt[MAX_PHRASE_LEN];
 
+  gap_op_t gap_option;  // gap_option[i] means could have gap AFTER lexeme i, where [i] means " (gap_option & (1 << i)) != 0 "  --  assumes max phrase length < 32
+
   mtuid  ident;
 
-  bool operator<(const mtu_item &lhs) const { return ident < lhs.ident; }
+  bool operator==(const mtu_item &lhs) const { 
+    if ((src_len != lhs.src_len) ||
+        (tgt_len != lhs.tgt_len) ||
+        (gap_option != lhs.gap_option))
+      return false;
+    for (posn i=0; i<src_len; i++)
+      if (src[i] != lhs.src[i])
+        return false;
+    for (posn i=0; i<tgt_len; i++)
+      if (tgt[i] != lhs.tgt[i])
+        return false;
+    return true;
+  }
+
+  
 };
 
 struct mtu_for_sent {
@@ -61,7 +79,7 @@ struct mtu_for_sent {
   posn      found_at[MAX_PHRASE_LEN][NUM_MTU_OPTS];
 };
 
-typedef unordered_map< lexeme, vector<mtu_item*>* > mtu_item_dict;
+typedef unordered_map< lexeme, vector<mtu_item*> > mtu_item_dict;  // we want the mtu_items to be pointers so that mtu_for_sents can point at them easily
 
 struct hypothesis {
   char                  last_op;      // most recent operation
