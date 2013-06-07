@@ -183,24 +183,24 @@ bool is_covered(hypothesis *h, posn n) {
 
 void set_covered(hypothesis *h, posn n) {
   assert(! ((*(h->cov_vec))[n]) );
-  if (! h->cov_vec_alloc) {
-    assert( h->prev != NULL );
-    if( h->prev->cov_vec_count != h->prev->cov_vec->count() ) {
-      for (hypothesis*me=h; me!=NULL; me=me->prev) {
-        print_hypothesis(NULL, me);
-        cerr << me->cov_vec->to_string(' ', '*') << endl;
-      }
-      assert(false);
-    }
-    h->cov_vec = new bitset<MAX_SENTENCE_LENGTH>(*h->prev->cov_vec);
+  // if (! h->cov_vec_alloc) {
+  //   assert( h->prev != NULL );
+  //   if( h->prev->cov_vec_count != h->prev->cov_vec->count() ) {
+  //     for (hypothesis*me=h; me!=NULL; me=me->prev) {
+  //       print_hypothesis(NULL, me);
+  //       cerr << me->cov_vec->to_string(' ', '*') << endl;
+  //     }
+  //     assert(false);
+  //   }
+  //   h->cov_vec = new bitset<MAX_SENTENCE_LENGTH>(*h->prev->cov_vec);
 
-    (*h->cov_vec) ^= (*h->prev->cov_vec);
-    bool cov_vec_eq = ! h->cov_vec->any();
-    (*h->cov_vec) ^= (*h->prev->cov_vec);
-    assert(cov_vec_eq);
+  //   (*h->cov_vec) ^= (*h->prev->cov_vec);
+  //   bool cov_vec_eq = ! h->cov_vec->any();
+  //   (*h->cov_vec) ^= (*h->prev->cov_vec);
+  //   assert(cov_vec_eq);
 
-    h->cov_vec_alloc = true;
-  }
+  //   h->cov_vec_alloc = true;
+  // }
 
   if (h->cov_vec->count() != h->cov_vec_count) {
     for (hypothesis*me=h; me!=NULL; me=me->prev) {
@@ -220,14 +220,14 @@ void free_hypothesis_ring(hypothesis_ring*r) {
   while (r != NULL) {
     for (size_t i=0; i<r->my_size; i++) 
       if (r->my_hypotheses[i].tm_context != NULL)
-        delete r->my_hypotheses[i].tm_context;
+        if (r->my_hypotheses[i].tm_context) delete r->my_hypotheses[i].tm_context;
       //free(r->my_hypotheses[i].tm_context);
 
     for (size_t i=0; i<r->next_hypothesis; i++) {
       hypothesis *h = r->my_hypotheses + i;
-      if (h->lm_context_alloc) delete h->lm_context;
+      if (h->lm_context)       delete h->lm_context;
       if (h->gaps_alloc)       delete h->gaps;
-      if (h->cov_vec_alloc)    delete h->cov_vec;
+      if (h->cov_vec)          delete h->cov_vec;
     }
     free(r->my_hypotheses);
     to_free.push_back(r);
@@ -274,30 +274,19 @@ hypothesis* next_hypothesis(translation_info*info, hypothesis *h) {
     h2->queue_head = 0;
     h2->cov_vec = new bitset<MAX_SENTENCE_LENGTH>(); // new vector<bool>(info->N);
     h2->cov_vec_count = 0;
-    h2->cov_vec_alloc = true;
     h2->cov_vec_hash = 0;
     h2->n = 0;
     h2->Z = 0;
     h2->gaps = new set<posn>();
     h2->gaps_alloc = true;
-    if (info->language_model == NULL) {
-      h2->lm_context = NULL;
-      h2->lm_context_alloc = false;
-      h2->lm_context_hash = 0;
-    } else {
+    if (info->language_model != NULL) {
       h2->lm_context = new ng::State(info->language_model->BeginSentenceState());
-      h2->lm_context_alloc = true;
       h2->lm_context_hash = ng::hash_value(*h2->lm_context);
     }
-    if (info->opseq_model == NULL) {
-      h2->tm_context = NULL;
-      h2->tm_context_hash = 0;
-    } else {
+    if (info->opseq_model != NULL) {
       h2->tm_context = new ng::State(info->opseq_model->BeginSentenceState());
       h2->tm_context_hash = ng::hash_value(*h2->tm_context);
     }
-    //memset(h2->tm_context, OP_INIT, info->tm_context_len);
-    //h2->tm_context_hash = util::MurmurHashNative(h2->tm_context, info->tm_context_len * sizeof(mtuid), 0);
     h2->skippable = false;
     h2->cost = 1.;
     h2->prev = NULL;
@@ -305,17 +294,16 @@ hypothesis* next_hypothesis(translation_info*info, hypothesis *h) {
     memcpy(h2, h, sizeof(hypothesis));
     h2->last_op = OP_UNKNOWN;
     h2->op_argument = 0;
-    //h2->cov_vec = new bitset<MAX_SENTENCE_LENGTH>(*h->cov_vec);
-    //h2->cov_vec_alloc = true;
-    h2->cov_vec_alloc = false;
+    h2->cov_vec = new bitset<MAX_SENTENCE_LENGTH>(*h->cov_vec);
     h2->gaps_alloc = false;
+    if (info->language_model != NULL) {
       h2->lm_context = new ng::State(info->language_model->BeginSentenceState());
-      h2->lm_context_alloc = true;
       h2->lm_context_hash = ng::hash_value(*h2->lm_context);
-    //h2->lm_context_alloc = false;
-    h2->tm_context = new ng::State(info->opseq_model->BeginSentenceState());
-    h2->tm_context_hash = ng::hash_value(*h2->tm_context);
-      //    h2->tm_context = NULL;
+    }
+    if (info->opseq_model != NULL) {
+      h2->tm_context = new ng::State(info->opseq_model->BeginSentenceState());
+      h2->tm_context_hash = ng::hash_value(*h2->tm_context);
+    }
     h2->skippable = false;
     h2->prev = h;
   }
@@ -486,10 +474,10 @@ float shift_lm_context(translation_info* info, hypothesis *h, posn M, lexeme*tgt
   if (info->language_model == NULL)
     return log_prob;
 
-  if (!h->lm_context_alloc) {
-    h->lm_context = new ng::State(*(h->lm_context));
-    h->lm_context_alloc = true;
-  }
+  // if (!h->lm_context_alloc) {
+  //   h->lm_context = new ng::State(*(h->lm_context));
+  //   h->lm_context_alloc = true;
+  // }
   ng::State in_state = *(h->lm_context);
 
   in_state = *(h->lm_context);

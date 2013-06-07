@@ -93,7 +93,6 @@ struct hypothesis {
   
   bitset<MAX_SENTENCE_LENGTH> *cov_vec;
   posn cov_vec_count;
-  bool cov_vec_alloc;
   uint32_t cov_vec_hash;
 
   posn n;                             // current position in src
@@ -101,11 +100,7 @@ struct hypothesis {
   set<posn> * gaps;                   // where are the existing gaps
   bool gaps_alloc;
 
-  //lexeme * lm_context;
-  //bool lm_context_alloc;
-  //uint32_t lm_context_hash;
   lm::ngram::State * lm_context;
-  bool lm_context_alloc;
   uint32_t lm_context_hash;
 
   //mtuid * tm_context;
@@ -172,111 +167,5 @@ struct hyp_stack {
   float highest_cost;
   float prune_if_gt;
 };
-
-/*
-  algorithm:
-
-  - n indexes S, m indexes T
-
-  * the operations are:
-    * GEN_ST (S, T)
-        PRE
-          - src[n] = S[0]
-          - queue is empty
-          - not cov[n]
-        OP
-          - write down all of T at m
-          - m += len(T)
-          - cov[n] = true
-          - n += 1
-          - enqueue(S[1..])
-    * CONTINUE_WORD
-        PRE
-          - queue is not empty
-          - src[n] = queue.head
-          - not cov[n]
-        OP
-          - queue.pop
-          - cov[n] = true
-          - n += 1
-    * CONTINUE_GAP
-        PRE
-          - queue is not empty
-          - queue[0] = GAP
-          - queue[1] can be found at j in src[n..] and not cov[j]
-        OP
-          - queue.pop
-          - insert gap at n
-          - n <- j
-          - queue.pop
-          - cov[n] = true
-          - n += 1
-    * GAP
-        PRE
-          - queue is empty
-          - last op was not JUMP_BACK (o/w we're recreating a gap we just closed)
-          - # gaps < # uncovered F words
-        OP
-          - insert gap at n
-    * GEN_S (S)
-        PRE
-          - queue is empty
-          - src[n] = S
-          - last op was not GAP (o/w we could have done the GEN_S first)
-          - not cov[n]
-        OP
-          - cov[n] = true
-          - n += 1
-    * GEN_T (T)
-        PRE
-          - queue is empty (maybe???)
-        OP
-          - write down T at m
-          - m += 1
-    * JUMP_BACK (w)
-        PRE
-          - there are >= w many existing gaps
-          - queue is empty
-          - we are at the end
-          - we're not jumping to the same position
-        OP
-          - n <- wth previous gap
-          - remove wth previous gap from queue
-    * JUMP_TO_END
-        PRE
-          - n < max src index (Z)
-          - queue is empty
-        OP
-          - n <- Z
-
-
-
-removed:
-    * COPY (S)
-        PRE
-          - queue is empty
-          - src[n] = S
-          - not cov[n]
-        OP
-          - write down S at m
-          - m += 1
-          - cov[n] = true
-          - n += 1
-  this will only happen when there is no MTU at a current location
-   --> so just make "fake" MTUs
-
-
-claim: GAPS must be followed either by CONTINUEs or GEN_STs
-proof:
-  if followed by GEN_S, then it's equivalent to do whatever is contained in the gap, and then do the GEN_S
-  if followed by GEN_T, then it's equivalent to GEN_T and then do the GAP
-  if followed by JUMP_BACK, then (note, we must be a gap at the END):
-      - if the JUMP_BACK is to me, then this is a no-op
-      - if the JUMP_BACK is before me, then I could do the jump-back first and then jump end and then GAP
-  if followed by EOS, then no reason to insert GAP
-  if followed by JUMP_END
-*/
-
-
 
 #endif
