@@ -37,5 +37,35 @@ to read integer format) all the relevant data (en text, fr text and
 post-edited word alignments). There are also two binarized language
 models, one for en (test.en.arpa-bin) and one for fr (obvious name).
 
+We can now instruct ngdec to extract minimal translation units (MTUs)
+from the alignment (.ngdec) file:
 
+% ./ngdec extract test/test.ngdec > test/test.ngdec.mtus
 
+This should give you a dictionary of 17733 MTUs, 226 skipped for
+length. If you want longer ones, add "--max_phrase_length 10" (for
+instance) after the "extract" command.
+
+Now that we have the dictionary, we can extract operation sequences as
+follows:
+
+% ./ngdec oracle test/test.mtus test/test.ngdec > test/test.opseq
+
+As a sanity check, we can do "forced decoding" to see how close we can
+get to the English reference translations:
+
+% ./ngdec predict-forced test/test.mtus test/test.ngdec  | grep -n FAIL
+
+You should see that it failed on sentence pairs 302 and 1390 (this is
+because those two sentences require gaps larger than the model is
+willing to consider).
+
+We can (finally) train an operation sequence model on the opseq data
+using kenlm. We'll build a 5-gram model:
+
+% lmplz -o 5 -S 10% < test/test.opseq > test/test.opseq.arpa
+% build_binary test/test.opseq.arpa test/test.opseq.arpa-bin
+
+And no we can decode:
+
+% ./ngdec predict-lm test/test.en.arpa-bin test/test.opseq.arpa-bin test/test.mtus test/test.ngdec

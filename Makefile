@@ -7,8 +7,11 @@ KENLM_FLAGS = -I$(KENLM_DIR) -DKENLM_MAX_ORDER=9
 # for normal fast execution.
 FLAGS = $(KENLM_FLAGS) $(ARCH) -Wall $(OPTIM_FLAGS) -D_FILE_OFFSET_BITS=64
 
+# for "fast" profiling
+FLAGS = $(KENLM_FLAGS) -Wall $(ARCH) -D_FILE_OFFSET_BITS=64 -pg -O3 -ffast-math -fno-strict-aliasing
+
 # for profiling/debugging
-FLAGS = $(KENLM_FLAGS) -Wall $(ARCH) -D_FILE_OFFSET_BITS=64 -g -pg
+#FLAGS = $(KENLM_FLAGS) -Wall $(ARCH) -D_FILE_OFFSET_BITS=64 -g -pg
 
 # for valgrind
 #FLAGS = $(KENLM_FLAGS) -Wall $(ARCH) -D_FILE_OFFSET_BITS=64 -g -O0

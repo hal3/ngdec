@@ -13,33 +13,35 @@ using namespace std;
 
 #define INIT_HYPOTHESIS_RING_SIZE 1024
 
-#define MAX_PHRASE_LEN   5
-#define MAX_GAPS         5
-#define MAX_SENTENCE_LENGTH 200
-#define NUM_MTU_OPTS     5
+#define MAX_SENTENCE_LENGTH   200
+#define NUM_MTU_OPTS            5
 #define MAX_VOCAB_SIZE   10000000
-// TM_CONTEXT_LEN=3 means 4-gram translation model
-#define TM_CONTEXT_LEN   8
+#define MAX_PHRASE_LEN         10
 
 #define OP_UNKNOWN   0
 #define OP_INIT      1
 #define OP_GEN_ST    2
-#define OP_CONT_W    3
-#define OP_CONT_G    4
+#define OP_CONT_WORD 3
+#define OP_CONT_GAP  4
 #define OP_GEN_S     5
 #define OP_GEN_T     6
 #define OP_GAP       7
 #define OP_JUMP_B    8
 #define OP_JUMP_E    9
-#define OP_CONT_SKIP 10
-#define OP_MAXIMUM   11
+#define OP_MAXIMUM   10
 
-string OP_NAMES[OP_MAXIMUM] = { "unknown", "init", "gen_st", "cont_w", "cont_g", "gen_s", "gen_t", "gap", "jump_b", "jump_e", "cont_skip" };
+string OP_NAMES[OP_MAXIMUM] = { "OP_UNKNOWN", "OP_INIT", "OP_GEN_ST", "OP_CONT_W", "OP_CONT_G", "OP_GEN_S", "OP_GEN_T", "OP_GAP", "OP_JUMP_B", "OP_JUMP_E" };
 
-typedef unsigned char posn;   // should be large enough to store MAX_SENTENCE_LENGTH
+typedef unsigned short posn;   // should be large enough to store MAX_SENTENCE_LENGTH
 typedef lm::WordIndex lexeme;
 typedef uint32_t mtuid;
 typedef uint32_t gap_op_t;
+
+struct operation {
+  char op;
+  mtuid arg1;
+  posn  arg2;
+};
 
 lexeme UNK_LEX = (lexeme)0; // this "seems" to be the kenlm standard
 lexeme BOS_LEX = (lexeme)1;
@@ -54,6 +56,8 @@ struct mtu_item {
 
   gap_op_t gap_option;  // gap_option[i] means could have gap AFTER lexeme i, where [i] means " (gap_option & (1 << i)) != 0 "  --  assumes max phrase length < 32
 
+  size_t tr_freq;
+  size_t tr_doc_freq;
   mtuid  ident;
 
   bool operator==(const mtu_item &lhs) const { 
@@ -84,6 +88,7 @@ typedef unordered_map< lexeme, vector<mtu_item*> > mtu_item_dict;  // we want th
 struct hypothesis {
   char                  last_op;      // most recent operation
   const mtu_for_sent  * cur_mtu;      // the current (optional) mtu we're working on
+  size_t                op_argument;  // relevant argument to operation (optional, default = 0)
   posn queue_head;                    // which word in cur_mtu is "next"
   
   bitset<MAX_SENTENCE_LENGTH> *cov_vec;
@@ -103,7 +108,8 @@ struct hypothesis {
   bool lm_context_alloc;
   uint32_t lm_context_hash;
 
-  mtuid * tm_context;
+  //mtuid * tm_context;
+  lm::ngram::State * tm_context;
   uint32_t tm_context_hash;
 
   bool skippable; // recombination says we can be skipped!
@@ -112,6 +118,13 @@ struct hypothesis {
   hypothesis * prev;
 };
   
+
+struct mtu_item_info {
+  size_t doc_freq;
+  size_t token_freq;
+  gap_op_t gap;
+};
+
 
 typedef vector<vector<hypothesis*>> recombination_data;
 
@@ -136,11 +149,28 @@ struct translation_info {
   recombination_data * recomb_buckets;
 
   lm::ngram::Model * language_model;
+  lm::ngram::Model * opseq_model;
 
   vector< vector<mtu_for_sent*> > mtus_at;
-  uint32_t operation_allowed;
-  float  pruning_coefficient;
   float (*compute_cost)(void*,hypothesis*);
+
+  // settings
+  uint32_t operation_allowed;
+  float    pruning_coefficient;
+  size_t   max_bucket_size;
+  float    gen_s_cost;
+  float    gap_cost;
+  size_t   max_gaps;
+  size_t   tm_context_len;  // TM_CONTEXT_LEN=3 means 4-gram translation model
+  size_t   max_gap_width;
+  size_t   max_phrase_len;  // must be <= MAX_PHRASE_LEN
+};
+
+struct hyp_stack {
+  vector<hypothesis*> Stack;
+  float lowest_cost;
+  float highest_cost;
+  float prune_if_gt;
 };
 
 /*
