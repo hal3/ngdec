@@ -264,7 +264,7 @@ hypothesis* get_next_hyp_ring_element(translation_info *info) {
 }
 
 
-hypothesis* next_hypothesis(translation_info*info, hypothesis *h) {
+hypothesis* get_next_hypothesis(translation_info*info, hypothesis *h) {
   hypothesis *h2 = get_next_hyp_ring_element(info);
 
   if (h == NULL) {  // asking for initial hypothesis
@@ -519,7 +519,7 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
 
         if (is_ok_lex_position(info, h, n, idx, here)) { //             (h->gaps->size() < info->max_gaps)) { // TODO: figure out why I wrote the following: && (h->gaps->size() < num_uncovered)) {
 
-          hypothesis *h2 = next_hypothesis(info, h);
+          hypothesis *h2 = get_next_hypothesis(info, h);
           h2->last_op = OP_CONT_WORD;
           h2->queue_head++;
           set_covered(h2, here);
@@ -533,7 +533,7 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
 
       //cout << "n="<<n<<" info->sent[n]=" << info->sent[n] << ", lex="<<lex<<endl;
       if ((info->sent[n] == lex) && (!is_covered(h, n))) {  // generate the word!
-        hypothesis *h2 = next_hypothesis(info, h);
+        hypothesis *h2 = get_next_hypothesis(info, h);
         h2->last_op = OP_CONT_WORD;
         h2->queue_head++;
         set_covered(h2, n);
@@ -542,7 +542,7 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
       }
 
       if ((h->queue_head > 0) && gap_allowed_after(h->cur_mtu->mtu->gap_option, h->queue_head-1) && (h->gaps->size() < info->max_gaps) && (!last_op_was_gap) && (!contains(h->gaps,n))) {
-        hypothesis *h2 = next_hypothesis(info, h);
+        hypothesis *h2 = get_next_hypothesis(info, h);
         h2->last_op = OP_CONT_GAP;
         if (! h2->gaps_alloc) {
           h2->gaps = new set<posn>( *h->gaps );
@@ -564,7 +564,7 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
       vector<mtu_for_sent*> mtus = info->mtus_at[m];
       for (auto &mtu : mtus) {
         //cout << "trying @m="<<m<<" lex="<<info->sent[m]<<": "; print_mtu(*mtu->mtu);cout<<endl;
-        hypothesis *h2 = next_hypothesis(info, h);
+        hypothesis *h2 = get_next_hypothesis(info, h);
         h2->last_op = OP_GEN_ST;
         h2->op_argument = mtu->mtu->ident;
         set_covered(h2, m);
@@ -580,7 +580,7 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
   if ((h->gaps->size() < info->max_gaps) && (!last_op_was_gap) && (n<N) && (!is_covered(h,n)) && (!contains(h->gaps,n)) && queue_empty) {
     //        (h->gaps->size() < num_uncovered) &&   // TODO: be sure this was actually a bad idea
     //cout << "inserting gap at n=" << h->n <<" Z="<<h->Z<<endl;
-    hypothesis *h2 = next_hypothesis(info, h);
+    hypothesis *h2 = get_next_hypothesis(info, h);
     h2->last_op = OP_GAP;
     if (! h2->gaps_alloc) {
       h2->gaps = new set<posn>( *h->gaps );
@@ -602,7 +602,7 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
       assert(gap_id > 0);
       gap_id--;
       if (gap_pos+1 != h->n) {
-        hypothesis *h2 = next_hypothesis(info, h);
+        hypothesis *h2 = get_next_hypothesis(info, h);
         h2->last_op = OP_JUMP_B;
         h2->op_argument = (size_t)gap_id;
         h2->n = gap_pos;
@@ -617,7 +617,7 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
   }
 
   if ((n < N) && (!is_covered(h, n)) && (!last_op_was_gap)) { // generate just S
-    hypothesis *h2 = next_hypothesis(info, h);
+    hypothesis *h2 = get_next_hypothesis(info, h);
     h2->last_op = OP_GEN_S;
     h2->op_argument = (size_t)info->sent[n];
     set_covered(h2, n);
@@ -629,7 +629,7 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
     
   if ( (h->n < h->Z) && (h->last_op != OP_JUMP_B) && 
        ( ! ((last_last_op == OP_JUMP_B) && last_op_was_gap) ) ) {  // don't allow JUMP_B - GAP - JUMP_E
-    hypothesis *h2 = next_hypothesis(info, h);
+    hypothesis *h2 = get_next_hypothesis(info, h);
     h2->last_op = OP_JUMP_E;
     h2->n = h2->Z;
     if (prepare_for_add(info, h2)) add_operation(h2);
@@ -829,7 +829,7 @@ pair< vector<hypothesis*>, vector<hypothesis*> > stack_generic_search(translatio
   }
   assert(Stacks[5] == NULL); assert(Stacks[57] == NULL);
 
-  hypothesis *h0 = next_hypothesis(info, NULL);
+  hypothesis *h0 = get_next_hypothesis(info, NULL);
   size_t stack0 = get_stack_id(h0);
   NextStacks.push(stack0);
   Stacks[stack0] = new hyp_stack();
@@ -945,7 +945,7 @@ bool force_decode_allowed(translation_info *info, vector<operation> op_seq, hypo
 }
 
 pair< vector<hypothesis*>, vector<hypothesis*> > stack_search(translation_info *info, vector<operation> *force_decode_op_seq = NULL) {
-  hypothesis *h0 = next_hypothesis(info, NULL);
+  hypothesis *h0 = get_next_hypothesis(info, NULL);
 
   stack<hypothesis*> S;
   vector<hypothesis*> visited;
