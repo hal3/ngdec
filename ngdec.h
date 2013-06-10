@@ -14,9 +14,10 @@ using namespace std;
 #define INIT_HYPOTHESIS_RING_SIZE 1024
 
 #define MAX_SENTENCE_LENGTH   200
-#define NUM_MTU_OPTS            5
+#define NUM_MTU_OPTS           10
 #define MAX_VOCAB_SIZE   10000000
 #define MAX_PHRASE_LEN         10
+#define NUM_RECOMB_BUCKETS  10231
 
 #define OP_UNKNOWN   0
 #define OP_INIT      1
@@ -123,24 +124,38 @@ struct mtu_item_info {
 
 typedef vector<vector<hypothesis*>> recombination_data;
 
+struct four_lexemes {
+  lexeme w[4];
+};
+
+struct bleu_stats {
+  vector<four_lexemes> w;
+  posn ng_counts[4];
+};
+
 struct aligned_sentence_pair {
   vector<lexeme>           F;
   vector< vector<lexeme> > E;
   vector< vector<posn>   > A;
 };
 
-struct hypothesis_ring {
-  hypothesis * my_hypotheses;
-  size_t next_hypothesis;
+template<class T> struct ring {
+  T * my_T;
+  size_t next_T;
   size_t my_size;
-  hypothesis_ring* previous_ring;
+  ring<T>* previous_ring;
 };
+
+typedef ring<hypothesis> hypothesis_ring;
 
 struct translation_info {
   lexeme sent[MAX_SENTENCE_LENGTH];
   posn N;
 
   hypothesis_ring * hyp_ring;
+  ring<lm::ngram::State> * lm_state_ring;
+  ring<lm::ngram::State> * tm_state_ring;
+
   recombination_data * recomb_buckets;
 
   lm::ngram::Model * language_model;
@@ -149,6 +164,11 @@ struct translation_info {
   vector< vector<mtu_for_sent*> > mtus_at;
   float (*compute_cost)(void*,hypothesis*);
 
+  size_t bleu_intersection[4];
+  size_t bleu_ref_counts[4];
+  size_t bleu_total_hyp_len;
+  bleu_stats bleu_total_stats;
+  
   // settings
   uint32_t operation_allowed;
   float    pruning_coefficient;
@@ -156,9 +176,13 @@ struct translation_info {
   float    gen_s_cost;
   float    gap_cost;
   size_t   max_gaps;
-  size_t   tm_context_len;  // TM_CONTEXT_LEN=3 means 4-gram translation model
   size_t   max_gap_width;
   size_t   max_phrase_len;  // must be <= MAX_PHRASE_LEN
+
+  // status
+  size_t total_sentence_count;
+  size_t total_word_count;
+  size_t next_sentence_print;
 };
 
 struct hyp_stack {
@@ -166,6 +190,7 @@ struct hyp_stack {
   float lowest_cost;
   float highest_cost;
   float prune_if_gt;
+  size_t num_marked_skippable;
 };
 
 #endif

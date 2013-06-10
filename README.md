@@ -40,7 +40,7 @@ models, one for en (test.en.arpa-bin) and one for fr (obvious name).
 We can now instruct ngdec to extract minimal translation units (MTUs)
 from the alignment (.ngdec) file:
 
-% ./ngdec extract test/test.ngdec > test/test.ngdec.mtus
+% ./ngdec extract test/test.ngdec > test/test.mtus
 
 This should give you a dictionary of 17733 MTUs, 226 skipped for
 length. If you want longer ones, add "--max_phrase_length 10" (for

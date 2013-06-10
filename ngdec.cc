@@ -23,6 +23,113 @@ namespace std {
   };
 }
 
+
+bool lt_bleu_stat(four_lexemes a, four_lexemes b) {
+  return (a.w[0] <  b.w[0]) ||
+       ( (a.w[0] == b.w[0]) && (a.w[1] < b.w[1]) ) ||
+       ( (a.w[0] == b.w[0]) && (a.w[1] == b.w[1]) && (a.w[2] < b.w[2]) ) ||
+       ( (a.w[0] == b.w[0]) && (a.w[1] == b.w[1]) && (a.w[2] == b.w[2]) && (a.w[3] < b.w[3]) );
+}
+
+bool eq_bleu_stat(four_lexemes a, four_lexemes b) {
+  return (a.w[0] == b.w[0]) &&
+         (a.w[1] == b.w[1]) &&
+         (a.w[2] == b.w[2]) &&
+         (a.w[3] == b.w[3]);
+}
+
+void accum_bleu_intersection(bleu_stats R, bleu_stats H, size_t intersection[4]) {
+  size_t i=0, j=0;
+  while ((i < R.w.size()) && (j < H.w.size())) {
+    if (eq_bleu_stat(R.w[i], H.w[j])) {
+      if      (R.w[i].w[3] != 0) intersection[3]++;
+      else if (R.w[i].w[2] != 0) intersection[2]++;
+      else if (R.w[i].w[1] != 0) intersection[1]++;
+      else                       intersection[0]++;
+      i++;
+      j++;
+    } else if (lt_bleu_stat(R.w[i], H.w[j])) {
+      i++;
+    } else {
+      assert(lt_bleu_stat(H.w[j], R.w[i]));
+      j++;
+    }
+  }
+}
+
+void compute_bleu_stats(vector<lexeme> E, bleu_stats *stats) {
+  posn N = E.size();
+  stats->w.clear();
+
+  for (posn n=0; n<N; n++) {
+    // 0 = unk will never be used!
+               stats->w.push_back(  { { E[n], 0, 0, 0 } } );
+    if (n+1<N) stats->w.push_back( { { E[n], E[n+1], 0, 0 } } );
+    if (n+2<N) stats->w.push_back( { { E[n], E[n+1], E[n+2], 0 } } );
+    if (n+3<N) stats->w.push_back( { { E[n], E[n+1], E[n+2], E[n+3] } } );
+  }
+  stats->ng_counts[0] = N;
+  stats->ng_counts[1] = (N>=1) ? (N-1) : 0;
+  stats->ng_counts[2] = (N>=2) ? (N-2) : 0;
+  stats->ng_counts[3] = (N>=3) ? (N-3) : 0;
+  sort(stats->w.begin(), stats->w.end(), lt_bleu_stat);
+}
+
+void update_bleu_stats(translation_info*info, vector<lexeme>trans) {
+  bleu_stats hyp_stats;
+  compute_bleu_stats(trans, &hyp_stats);
+  accum_bleu_intersection(info->bleu_total_stats, hyp_stats, info->bleu_intersection);
+  info->bleu_total_hyp_len += hyp_stats.ng_counts[0];
+  //cout << '|' << bleu_intersection[0] << '|' << bleu_intersection[1] << '|' << bleu_intersection[2] << '|' << bleu_intersection[3] << "\t";
+}
+
+float compute_overall_bleu(translation_info*info, bool print) {
+  float bleu = 1;
+  for (posn i=0; i<4; i++) {
+    float v = (float)info->bleu_intersection[i] / (float)info->bleu_ref_counts[i];
+    if (print) cerr << v << " ";
+    bleu *= v;
+  }
+  bleu = pow(bleu, 0.25);
+  if (info->bleu_total_hyp_len <= info->bleu_ref_counts[0])
+    bleu *= exp(1 - info->bleu_ref_counts[0] / info->bleu_total_hyp_len);
+  if (print)
+    cerr << " | " << info->bleu_total_hyp_len << " " << info->bleu_ref_counts[0] << "\t" << bleu << endl;
+  return bleu;
+}
+
+
+void initialize_translation_info(int argc, char*argv[], translation_info&info) {
+  info.N = 0;
+  info.hyp_ring = NULL;
+  info.recomb_buckets = new recombination_data(NUM_RECOMB_BUCKETS);
+  info.language_model = NULL;
+  info.opseq_model = NULL;
+  info.compute_cost = NULL;
+
+  info.tm_state_ring = NULL;
+  info.lm_state_ring = NULL;
+
+  memset(info.bleu_intersection, 0, 4*sizeof(size_t));
+  memset(info.bleu_ref_counts, 0, 4*sizeof(size_t));
+  info.bleu_total_hyp_len = 0;
+  info.bleu_total_stats.w.clear();
+  memset(info.bleu_total_stats.ng_counts, 0, 4*sizeof(posn));
+
+  info.operation_allowed = (1 << OP_MAXIMUM) - 1;  // all operations
+  info.pruning_coefficient = 10.;
+  info.max_bucket_size = 500;
+  info.gen_s_cost = 10;
+  info.gap_cost = 10;
+  info.max_gaps = 5;
+  info.max_gap_width = 16;
+  info.max_phrase_len = 5;
+
+  info.total_sentence_count = 0;
+  info.total_word_count = 0;
+  info.next_sentence_print = 100;
+}
+
 bool gap_allowed_after(gap_op_t gap_option, posn i) {
   assert(i >= 0); assert(i < 31);
   return (gap_option & (1 << i)) != 0;
@@ -57,7 +164,7 @@ void pretty_print_op_seq(vector<operation> ops) {
     first = false;
     get_op_string(op.op, op.arg1, ss);
   }
-  cout<<ss<<endl;
+  cout<<ss.str()<<endl;
 }
 
 void print_coverage(bitset<MAX_SENTENCE_LENGTH> cov, posn N, posn cursor) {
@@ -183,31 +290,6 @@ bool is_covered(hypothesis *h, posn n) {
 
 void set_covered(hypothesis *h, posn n) {
   assert(! ((*(h->cov_vec))[n]) );
-  // if (! h->cov_vec_alloc) {
-  //   assert( h->prev != NULL );
-  //   if( h->prev->cov_vec_count != h->prev->cov_vec->count() ) {
-  //     for (hypothesis*me=h; me!=NULL; me=me->prev) {
-  //       print_hypothesis(NULL, me);
-  //       cerr << me->cov_vec->to_string(' ', '*') << endl;
-  //     }
-  //     assert(false);
-  //   }
-  //   h->cov_vec = new bitset<MAX_SENTENCE_LENGTH>(*h->prev->cov_vec);
-
-  //   (*h->cov_vec) ^= (*h->prev->cov_vec);
-  //   bool cov_vec_eq = ! h->cov_vec->any();
-  //   (*h->cov_vec) ^= (*h->prev->cov_vec);
-  //   assert(cov_vec_eq);
-
-  //   h->cov_vec_alloc = true;
-  // }
-
-  if (h->cov_vec->count() != h->cov_vec_count) {
-    for (hypothesis*me=h; me!=NULL; me=me->prev) {
-      print_hypothesis(NULL, me);
-      cerr << me->cov_vec->to_string(' ', '*') << endl;
-    }
-  }
   (*(h->cov_vec))[n] = true;
   h->cov_vec_hash += n * 38904831901;
   h->cov_vec_count++;
@@ -215,21 +297,21 @@ void set_covered(hypothesis *h, posn n) {
   assert( h->cov_vec->count() == h->prev->cov_vec->count()+1);
 }
 
-void free_hypothesis_ring(hypothesis_ring*r) {
-  vector<hypothesis_ring*> to_free;
+
+void free_one_hypothesis(hypothesis*h) {
+  //if (h->tm_context)       delete h->tm_context;
+  //if (h->lm_context)       delete h->lm_context;
+  if (h->gaps_alloc)       delete h->gaps;
+  if (h->cov_vec)          delete h->cov_vec;
+}
+
+template<class T> void free_ring(ring<T>*r, void(*delete_T)(T*)) {
+  vector< ring<T>* > to_free;
   while (r != NULL) {
     for (size_t i=0; i<r->my_size; i++) 
-      if (r->my_hypotheses[i].tm_context != NULL)
-        if (r->my_hypotheses[i].tm_context) delete r->my_hypotheses[i].tm_context;
-      //free(r->my_hypotheses[i].tm_context);
+      delete_T( r->my_T + i );
 
-    for (size_t i=0; i<r->next_hypothesis; i++) {
-      hypothesis *h = r->my_hypotheses + i;
-      if (h->lm_context)       delete h->lm_context;
-      if (h->gaps_alloc)       delete h->gaps;
-      if (h->cov_vec)          delete h->cov_vec;
-    }
-    free(r->my_hypotheses);
+    free(r->my_T);
     to_free.push_back(r);
     r = r->previous_ring;
   }
@@ -237,35 +319,45 @@ void free_hypothesis_ring(hypothesis_ring*r) {
     free(r);
 }
 
-hypothesis_ring* initialize_hypothesis_ring(translation_info*info, size_t desired_size) {
-  hypothesis_ring *r = (hypothesis_ring*) calloc(1, sizeof(hypothesis_ring));
-  r->my_hypotheses = (hypothesis*) calloc(desired_size, sizeof(hypothesis));
-  //for (size_t i=0; i<desired_size; i++)
-  //  r->my_hypotheses[i].tm_context = (mtuid*) calloc(info->tm_context_len, sizeof(mtuid));
-  r->next_hypothesis = 0;
+template<class T> void free_ring(ring<T>*r) {
+  vector< ring<T>* > to_free;
+  while (r != NULL) {
+    free(r->my_T);
+    to_free.push_back(r);
+    r = r->previous_ring;
+  }
+  for (auto r : to_free)
+    free(r);
+}
+
+template<class T> ring<T>* initialize_ring(size_t desired_size) {
+  ring<T> *r = (ring<T>*) calloc(1, sizeof(ring<T>));
+  r->my_T = (T*) calloc(desired_size, sizeof(T));
+  r->next_T = 0;
   r->my_size = desired_size;
   r->previous_ring = NULL;
   return r;
 }
 
-hypothesis* get_next_hyp_ring_element(translation_info *info) {
-  if (info->hyp_ring->next_hypothesis >= info->hyp_ring->my_size) {
+template<class T> T* get_next_ring_element(ring<T> *&r) {
+  if (r->next_T >= r->my_size) {
     // need to make more hypotheses!
-    size_t new_size = info->hyp_ring->my_size * 2;
-    if (new_size < info->hyp_ring->my_size)
-      new_size = info->hyp_ring->my_size;
-    hypothesis_ring * new_ring = initialize_hypothesis_ring(info, new_size);
-    new_ring->previous_ring = info->hyp_ring;
-    info->hyp_ring = new_ring;
+    size_t new_size = r->my_size * 2;
+    if (new_size < r->my_size)
+      new_size = r->my_size;
+    ring<T> * new_ring = initialize_ring<T>(new_size);
+    new_ring->previous_ring = r;
+    r = new_ring;
   }
 
-  info->hyp_ring->next_hypothesis ++;
-  return info->hyp_ring->my_hypotheses + (info->hyp_ring->next_hypothesis-1);
+  T* ret = r->my_T + r->next_T;
+  r->next_T ++;
+  return ret;
 }
 
 
 hypothesis* get_next_hypothesis(translation_info*info, hypothesis *h) {
-  hypothesis *h2 = get_next_hyp_ring_element(info);
+  hypothesis *h2 = get_next_ring_element<hypothesis>(info->hyp_ring);
 
   if (h == NULL) {  // asking for initial hypothesis
     h2->last_op = OP_INIT;
@@ -279,31 +371,25 @@ hypothesis* get_next_hypothesis(translation_info*info, hypothesis *h) {
     h2->Z = 0;
     h2->gaps = new set<posn>();
     h2->gaps_alloc = true;
-    if (info->language_model != NULL) {
-      h2->lm_context = new ng::State(info->language_model->BeginSentenceState());
-      h2->lm_context_hash = ng::hash_value(*h2->lm_context);
-    }
-    if (info->opseq_model != NULL) {
-      h2->tm_context = new ng::State(info->opseq_model->BeginSentenceState());
-      h2->tm_context_hash = ng::hash_value(*h2->tm_context);
-    }
+    h2->lm_context = NULL; // this means "BOS"
+    if (info->language_model != NULL)
+      h2->lm_context_hash = ng::hash_value(info->language_model->BeginSentenceState());
+    h2->tm_context = NULL; // this means "BOS"
+    //h2->tm_context = new ng::State(info->opseq_model->BeginSentenceState());
+    if (info->opseq_model != NULL)
+      h2->tm_context_hash = ng::hash_value(info->opseq_model->BeginSentenceState());
     h2->skippable = false;
     h2->cost = 1.;
     h2->prev = NULL;
   } else {
     memcpy(h2, h, sizeof(hypothesis));
     h2->last_op = OP_UNKNOWN;
-    h2->op_argument = 0;
     h2->cov_vec = new bitset<MAX_SENTENCE_LENGTH>(*h->cov_vec);
     h2->gaps_alloc = false;
-    if (info->language_model != NULL) {
-      h2->lm_context = new ng::State(info->language_model->BeginSentenceState());
-      h2->lm_context_hash = ng::hash_value(*h2->lm_context);
-    }
-    if (info->opseq_model != NULL) {
-      h2->tm_context = new ng::State(info->opseq_model->BeginSentenceState());
-      h2->tm_context_hash = ng::hash_value(*h2->tm_context);
-    }
+    if (info->language_model != NULL)
+      h2->lm_context = get_next_ring_element(info->lm_state_ring);
+    if (info->opseq_model != NULL)
+      h2->tm_context = get_next_ring_element(info->tm_state_ring);
     h2->skippable = false;
     h2->prev = h;
   }
@@ -370,12 +456,10 @@ bool is_ok_lex_position(translation_info *info, hypothesis* h, posn n, size_t i,
   posn queue_head = h->queue_head+1;
   mtu_item *it = mtu->mtu;
 
-  //cout << "is_ok_lex_position: here="<<(short)here<<" n="<<(short)n<<" is_covered="<<is_covered(h,here)<<endl;
-
   if (here > MAX_SENTENCE_LENGTH)
     return false;
 
-  if ((here >= n) && (! is_covered(h, here))) {
+  if ((here >= n)  && (! is_covered(h, here))) {
     bool can_add_here = true;
     // check to make sure it's (likely to be) "completeable"
     
@@ -384,10 +468,10 @@ bool is_ok_lex_position(translation_info *info, hypothesis* h, posn n, size_t i,
       for (posn q_ptr=queue_head+1; q_ptr < it->src_len; q_ptr++) {
         bool found = false;
         for (size_t j=0; j<NUM_MTU_OPTS; j++) {
-          posn there = mtu->found_at[q_ptr][i];
+          posn there = mtu->found_at[q_ptr][j];
           if (there > MAX_SENTENCE_LENGTH)
             break;
-          if ((there > min_pos)  && (! is_covered(h, there))) {
+          if ((there > min_pos)  && (! is_covered(h, there)) && (there <= min_pos + info->max_gap_width)) {
             found = true;
             min_pos = there;
             break;
@@ -406,49 +490,22 @@ bool is_ok_lex_position(translation_info *info, hypothesis* h, posn n, size_t i,
   return false;
 }
 
-vector<posn> get_lex_positions(translation_info *info, hypothesis* h, posn n) {
-  // mtu->mtu->src[queue_head] is a word
-  // we want to know all "future" positions where this word occurs
-  vector<posn> posns;
-  for (size_t i=0; i<NUM_MTU_OPTS; i++) {
-    posn here = h->cur_mtu->found_at[h->queue_head+1][i];
-    if (is_ok_lex_position(info, h, n, i, here))
-      posns.push_back(here);
-  }
-  return posns;
-}
+// vector<posn> get_lex_positions(translation_info *info, hypothesis* h, posn n) {
+//   // mtu->mtu->src[queue_head] is a word
+//   // we want to know all "future" positions where this word occurs
+//   vector<posn> posns;
+//   for (size_t i=0; i<NUM_MTU_OPTS; i++) {
+//     posn here = h->cur_mtu->found_at[h->queue_head+1][i];
+//     if (is_ok_lex_position(info, h, n, i, here))
+//       posns.push_back(here);
+//   }
+//   return posns;
+// }
 
 // returns TRUE if should be added
 bool prepare_for_add(translation_info*info, hypothesis*h) {
   if ((info->operation_allowed & (1 << h->last_op)) > 0) {
     h->Z = MAX(h->Z, h->n);
-    //h->cost = info->compute_cost(info, h);
-
-
-    /*
-    mtuid tm = h->last_op;
-    switch (h->last_op) {
-    case OP_JUMP_B:
-      tm = OP_MAXIMUM + (mtuid)((size_t) h->cur_mtu);
-      break;
-      
-    case OP_GEN_S:
-      tm = OP_MAXIMUM + info->max_gaps + info->sent[h->n - 1];
-      break;
-
-    case OP_GEN_T:
-      tm = OP_MAXIMUM + info->max_gaps + MAX_VOCAB_SIZE + 0; // TODO: target lexeme;
-      break;
-
-    case OP_GEN_ST:
-      tm = OP_MAXIMUM + info->max_gaps + 2 * MAX_VOCAB_SIZE + h->cur_mtu->mtu->ident;
-      break;
-    }
-
-    memmove(h->tm_context, h->tm_context+1, (info->tm_context_len-1) * sizeof(mtuid));
-    h->tm_context[info->tm_context_len-1]= tm;
-    h->tm_context_hash = util::MurmurHashNative(h->tm_context, info->tm_context_len * sizeof(mtuid), 0);
-    */
 
     if (info->opseq_model != NULL) {
       // TODO: can this be made faster???
@@ -456,9 +513,10 @@ bool prepare_for_add(translation_info*info, hypothesis*h) {
       get_op_string(h->last_op, h->op_argument, ss);
       size_t this_op = info->opseq_model->GetVocabulary().Index(ss.str());
 
-      //if (h->tm_context == NULL)
-        //h->tm_context = new ng::State();
-      float log_prob = info->opseq_model->Score(h->prev->tm_context, this_op, h->tm_context);
+      //cerr << "["<<ss.str()<<":"<<this_op<<"]";
+
+      ng::State in_state = h->prev->tm_context ? *(h->prev->tm_context) : ng::State(info->opseq_model->BeginSentenceState());
+      float log_prob = info->opseq_model->Score(in_state, this_op, *h->tm_context);
       h->tm_context_hash = ng::hash_value(*h->tm_context);
       h->cost -= log_prob;
     }
@@ -469,25 +527,19 @@ bool prepare_for_add(translation_info*info, hypothesis*h) {
   }
 }
 
-float shift_lm_context(translation_info* info, hypothesis *h, posn M, lexeme*tgt) {
+void shift_lm_context(translation_info* info, hypothesis *h, posn M, lexeme*tgt) {
   float log_prob = 0.;
   if (info->language_model == NULL)
-    return log_prob;
+    return;
 
-  // if (!h->lm_context_alloc) {
-  //   h->lm_context = new ng::State(*(h->lm_context));
-  //   h->lm_context_alloc = true;
-  // }
-  ng::State in_state = *(h->lm_context);
-
-  in_state = *(h->lm_context);
+  ng::State in_state = h->prev->lm_context ? *(h->prev->lm_context) : ng::State(info->language_model->BeginSentenceState());
   for (posn m=0; m<M; m++) {
     log_prob += info->language_model->Score(in_state, tgt[m], *(h->lm_context));
     in_state = *(h->lm_context);
   }
   h->lm_context_hash = ng::hash_value(*h->lm_context);
 
-  return log_prob;
+  h->cost -= log_prob;
 }
 
 template<class T> bool contains(set<T>* S, T t) {
@@ -514,6 +566,11 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
     if (h->last_op == OP_CONT_GAP) {
       for (size_t idx=0; idx<NUM_MTU_OPTS; idx++) {
         posn here = h->cur_mtu->found_at[h->queue_head][idx];
+
+        //if ((h->last_op == OP_CONT_GAP) && (h->op_argument == 17306)) {
+        //  cout << "trying to CONT_WORD idx="<<idx<<" here="<<here<<" MAX_SENTENCE_LENGTH="<<MAX_SENTENCE_LENGTH<<" n+mgw="<<(h->n+info->max_gap_width)<<" isok="<<is_ok_lex_position(info,h,n,idx,here,true)<<endl;
+        //}
+            
         if (here > MAX_SENTENCE_LENGTH) break;
         if (here >= h->n + info->max_gap_width) break;
 
@@ -571,7 +628,8 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
         h2->n = m+1;
         h2->cur_mtu = mtu;
         h2->queue_head = 1;
-        h2->cost -= shift_lm_context(info, h2, mtu->mtu->tgt_len, mtu->mtu->tgt);
+        shift_lm_context(info, h2, mtu->mtu->tgt_len, mtu->mtu->tgt);
+
         if (prepare_for_add(info, h2)) add_operation(h2);
       }
     }
@@ -653,6 +711,7 @@ void expand_to_generation(translation_info *info, hypothesis *h, function<void(h
   while (! my_stack.empty()) {
     //cerr << "|my_stack| = " << my_stack.size() << endl;
     hypothesis*cur = my_stack.top(); my_stack.pop();
+
     expand_one_step(info, cur, [info,add_operation,my_stack](hypothesis*next) mutable -> void {
         if (is_final_hypothesis(info, next) ||
             (next->last_op == OP_GEN_ST) ||
@@ -675,6 +734,7 @@ void set_pruning_threshold(translation_info *info, hyp_stack* stack) {
 size_t bucket_contains_equiv(translation_info*info, vector<hypothesis*> bucket, hypothesis *h) {
   for (size_t pos=0; pos<bucket.size(); pos++) {
     hypothesis *h2 = bucket[pos];
+    if (h2->skippable) continue;
     if (h->lm_context_hash != h2->lm_context_hash) continue;
     if (h->tm_context_hash != h2->tm_context_hash) continue;
     if (h->cov_vec_hash    != h2->cov_vec_hash   ) continue;
@@ -700,6 +760,7 @@ size_t bucket_contains_equiv(translation_info*info, vector<hypothesis*> bucket, 
   return (size_t)-1;
 }
 
+/*
 void recombine_stack(translation_info *info, hyp_stack* stack) {
   recombination_data * buckets = info->recomb_buckets;
   size_t mod = buckets->size();
@@ -707,7 +768,7 @@ void recombine_stack(translation_info *info, hyp_stack* stack) {
   for (auto vec = buckets->begin(); vec != buckets->end(); vec++)
     (*vec).clear();
 
-  for (auto h : stack->Stack) {
+  for (hypothesis* h : stack->Stack) {
     if (h->skippable) continue;
     size_t id = (h->lm_context_hash * 3481183 +
                  h->tm_context_hash * 8942137 +
@@ -724,10 +785,11 @@ void recombine_stack(translation_info *info, hyp_stack* stack) {
       } else {
         h->skippable = true;
       }
+      stack->num_marked_skippable++;
     }
   }
 }
-/*
+
 void add_to_stack(translation_info *info, vector<hypothesis*> &S, hypothesis*h) {
   if (false) {
     S.push_back(h);
@@ -757,8 +819,57 @@ void initialize_hyp_stack(hyp_stack* stack) {
   stack->lowest_cost  = FLT_MAX;
   stack->highest_cost = FLT_MIN;
   stack->prune_if_gt  = FLT_MAX;
+  stack->num_marked_skippable = 0;
 }
 
+void add_to_hyp_stack(translation_info*info, hyp_stack* stack, hypothesis* h) {
+  if (h->skippable)
+    return;
+
+  {  // try recombining before we try pruning
+    recombination_data *buckets = info->recomb_buckets;
+    size_t mod = buckets->size();
+
+    size_t id = (h->lm_context_hash * 3481183 +
+                 h->tm_context_hash * 8942137 +
+                 h->cov_vec_hash    * 9138921) % mod;
+  
+    size_t equiv_pos = bucket_contains_equiv(info, (*buckets)[id], h);
+
+    if (equiv_pos != (size_t) -1) {   // we can recombine at equiv_pos
+      //cerr<<"+";
+      if (h->cost >= (*buckets)[id][equiv_pos]->cost)
+        h->skippable = true; // we're more expensive, so ignore
+      else {
+        (*buckets)[id][equiv_pos]->skippable = true; // we're cheaper, so set the other one to skippable and add us to the stack
+        stack->num_marked_skippable++;
+      }
+    } else {
+      //cerr<<"-";
+      (*buckets)[id].push_back(h);
+    }      
+  }
+
+  if (h->skippable) return;
+  if (h->cost > stack->prune_if_gt) return;
+  if ((stack->Stack.size() >= info->max_bucket_size + stack->num_marked_skippable) && 
+      (h->cost >= stack->highest_cost)) 
+    return;
+
+  stack->Stack.push_back(h);
+
+  if (h->cost > stack->highest_cost) 
+    stack->highest_cost = h->cost;
+
+  if (h->cost < stack->lowest_cost ) { 
+    stack->lowest_cost  = h->cost;
+    if (info->pruning_coefficient >= 1)
+      stack->prune_if_gt = stack->lowest_cost * info->pruning_coefficient;
+  }
+
+}
+
+/*
 void add_to_hyp_stack(translation_info*info, hyp_stack* stack, hypothesis* h, bool try_recombination) {
   if (h->skippable)
     return;
@@ -766,9 +877,9 @@ void add_to_hyp_stack(translation_info*info, hyp_stack* stack, hypothesis* h, bo
   if (h->cost > stack->prune_if_gt)
     return;
  
-  if ((stack->Stack.size() >= info->max_bucket_size) &&
-      (h->cost >= stack->highest_cost))
-    return;
+  // if ((stack->Stack.size() >= info->max_bucket_size) &&
+  //     (h->cost >= stack->highest_cost))
+  //   return;
 
   if (false && try_recombination) {
     recombination_data *buckets = info->recomb_buckets;
@@ -793,16 +904,23 @@ void add_to_hyp_stack(translation_info*info, hyp_stack* stack, hypothesis* h, bo
       }
     }
   } else {
+
     stack->Stack.push_back(h);
     if (h->cost < stack->lowest_cost ) stack->lowest_cost  = h->cost;
     if (h->cost > stack->highest_cost) stack->highest_cost = h->cost;
   }
 }
+*/
 
-bool sort_hyp_by_cost(hypothesis*a, hypothesis*b) { return a->cost < b->cost; }
+bool sort_hyp_by_cost(hypothesis*a, hypothesis*b) { 
+  if (a->skippable && b->skippable) return true;
+  if (a->skippable) return false; // a is skippable, b not
+  if (b->skippable) return true;  // b is skippable, a not
+  return a->cost < b->cost; 
+}
 
 void shrink_hyp_stack(translation_info*info, hyp_stack* stack, bool force_shrink=false) {
-  if (stack->Stack.size() <= info->max_bucket_size)
+  if (stack->Stack.size() /* - stack->num_marked_skippable */ <= info->max_bucket_size)
     return;
 
   if ((!force_shrink) && (stack->Stack.size() <= 2*info->max_bucket_size))
@@ -816,6 +934,10 @@ void shrink_hyp_stack(translation_info*info, hyp_stack* stack, bool force_shrink
   middle = stack->Stack.begin() + info->max_bucket_size;
   end    = stack->Stack.end();
   stack->Stack.erase(middle, end);
+
+  stack->num_marked_skippable = 0;
+  for (auto it : stack->Stack)
+    stack->num_marked_skippable += (*it).skippable;
 }
 
 pair< vector<hypothesis*>, vector<hypothesis*> > stack_generic_search(translation_info *info, size_t (*get_stack_id)(hypothesis*), size_t num_stacks_reserve=0) {
@@ -827,63 +949,57 @@ pair< vector<hypothesis*>, vector<hypothesis*> > stack_generic_search(translatio
   if (num_stacks_reserve > 0) {
     Stacks.reserve(num_stacks_reserve);
   }
-  assert(Stacks[5] == NULL); assert(Stacks[57] == NULL);
 
   hypothesis *h0 = get_next_hypothesis(info, NULL);
   size_t stack0 = get_stack_id(h0);
   NextStacks.push(stack0);
   Stacks[stack0] = new hyp_stack();
   initialize_hyp_stack(Stacks[stack0]);
-
-  add_to_hyp_stack(info, Stacks[stack0], h0, false);
+  add_to_hyp_stack(info, Stacks[stack0], h0);
 
   while (! NextStacks.empty()) {
     size_t cur_stack = NextStacks.top(); NextStacks.pop();
-    //cout << "cur_stack="<<cur_stack<<endl;
     if (Stacks[cur_stack] == NULL) continue;
-    //cerr<<"["<<Stacks[cur_stack]->Stack.size();
 
-    set_pruning_threshold(info, Stacks[cur_stack]);
-    recombine_stack(info, Stacks[cur_stack]);
-    //cerr<<":"<<Stacks[cur_stack]->Stack.size();
+    if (NextStacks.empty())
+      for (auto vec = info->recomb_buckets->begin(); vec != info->recomb_buckets->end(); vec++)
+        (*vec).clear();
+
+    //cerr<<"["<<(Stacks[cur_stack]->Stack.size())<<"-"<<Stacks[cur_stack]->num_marked_skippable<<"="<<(Stacks[cur_stack]->Stack.size()-Stacks[cur_stack]->num_marked_skippable);
     shrink_hyp_stack(info, Stacks[cur_stack], true);
-    // cerr<<":"<<Stacks[cur_stack]->Stack.size()<<"]";
-    // cerr<<"\t/"<<NextStacks.size()<<endl;
-
+    //cerr<<" _ "<<(Stacks[cur_stack]->Stack.size())<<"-"<<Stacks[cur_stack]->num_marked_skippable<<"="<<(Stacks[cur_stack]->Stack.size()-Stacks[cur_stack]->num_marked_skippable)<<"]";
     auto it = Stacks[cur_stack]->Stack.begin();
+    size_t num_processed = 0;
     while (it != Stacks[cur_stack]->Stack.end()) {
+      num_processed++;
       hypothesis *h = *it;
       if (h->cost > Stacks[cur_stack]->prune_if_gt) { it++; continue; }
       if (h->skippable) { it++; continue; }
 
       size_t diff = it - Stacks[cur_stack]->Stack.begin();
-      //cerr << endl<<"expanding: "; print_hypothesis(info, h);
-      //for (hypothesis* par=h->prev; par!=NULL; par=par->prev) { cerr <<"     from: "; print_hypothesis(info, par); } cout<<endl;
 
       expand_to_generation(info, h, [info,&Goals,cur_stack,&Stacks,&NextStacks,get_stack_id](hypothesis* next) mutable -> void {
-          //cerr << "     next: "; print_hypothesis(info, next);
-          // TODO: only keep around the k-best goals?
           if (is_final_hypothesis(info, next))
             Goals.push_back(next);
           else { // not final
             size_t next_stack = get_stack_id(next);
             assert(next_stack >= cur_stack);
             if (next_stack == cur_stack) {
-              add_to_hyp_stack(info, Stacks[cur_stack], next, true);
+              add_to_hyp_stack(info, Stacks[cur_stack], next);
             } else { // different stack
               if (Stacks[next_stack] == NULL) {
                 Stacks[next_stack] = new hyp_stack();
                 initialize_hyp_stack(Stacks[next_stack]);
                 NextStacks.push(next_stack);
               }
-              add_to_hyp_stack(info, Stacks[next_stack], next, false);
-              shrink_hyp_stack(info, Stacks[next_stack], false);
+              add_to_hyp_stack(info, Stacks[next_stack], next);
             }
           }
         });
       it = Stacks[cur_stack]->Stack.begin() + diff;
       it++;
     }
+    //cerr<<"("<<num_processed<<")";
     Stacks[cur_stack]->Stack.clear();
   }
 
@@ -891,6 +1007,81 @@ pair< vector<hypothesis*>, vector<hypothesis*> > stack_generic_search(translatio
 
   return { Goals, visited };
 }
+
+// pair< vector<hypothesis*>, vector<hypothesis*> > stack_generic_search(translation_info *info, size_t (*get_stack_id)(hypothesis*), size_t num_stacks_reserve=0) {
+//   unordered_map< size_t, hyp_stack* > Stacks;
+//   stack< size_t > NextStacks;
+//   vector< hypothesis* > visited;
+//   vector< hypothesis* > Goals;
+
+//   if (num_stacks_reserve > 0) {
+//     Stacks.reserve(num_stacks_reserve);
+//   }
+//   assert(Stacks[5] == NULL); assert(Stacks[57] == NULL);
+
+//   hypothesis *h0 = get_next_hypothesis(info, NULL);
+//   size_t stack0 = get_stack_id(h0);
+//   NextStacks.push(stack0);
+//   Stacks[stack0] = new hyp_stack();
+//   initialize_hyp_stack(Stacks[stack0]);
+
+//   add_to_hyp_stack(info, Stacks[stack0], h0, false);
+
+//   while (! NextStacks.empty()) {
+//     size_t cur_stack = NextStacks.top(); NextStacks.pop();
+//     //cout << "cur_stack="<<cur_stack<<endl;
+//     if (Stacks[cur_stack] == NULL) continue;
+
+//     cerr<<"["<<(Stacks[cur_stack]->Stack.size() - Stacks[cur_stack]->num_marked_skippable);
+//     set_pruning_threshold(info, Stacks[cur_stack]);
+//     recombine_stack(info, Stacks[cur_stack]);
+//     cerr<<":"<<(Stacks[cur_stack]->Stack.size() - Stacks[cur_stack]->num_marked_skippable);
+//     //shrink_hyp_stack(info, Stacks[cur_stack], true);
+//     cerr<<":"<<(Stacks[cur_stack]->Stack.size() - Stacks[cur_stack]->num_marked_skippable);
+//     cerr<<"]"<<endl;
+
+//     auto it = Stacks[cur_stack]->Stack.begin();
+//     while (it != Stacks[cur_stack]->Stack.end()) {
+//       hypothesis *h = *it;
+//       if (h->cost > Stacks[cur_stack]->prune_if_gt) { it++; continue; }
+//       if (h->skippable) { it++; continue; }
+
+//       size_t diff = it - Stacks[cur_stack]->Stack.begin();
+//       //cerr << endl<<"expanding: "; print_hypothesis(info, h);
+//       //for (hypothesis* par=h->prev; par!=NULL; par=par->prev) { cerr <<"     from: "; print_hypothesis(info, par); } cout<<endl;
+
+//       expand_to_generation(info, h, [info,&Goals,cur_stack,&Stacks,&NextStacks,get_stack_id](hypothesis* next) mutable -> void {
+//           //cerr << "     next: "; print_hypothesis(info, next);
+//           // TODO: only keep around the k-best goals?
+
+//           if (is_final_hypothesis(info, next))
+//             Goals.push_back(next);
+//           else { // not final
+//             size_t next_stack = get_stack_id(next);
+//             assert(next_stack >= cur_stack);
+//             if (next_stack == cur_stack) {
+//               add_to_hyp_stack(info, Stacks[cur_stack], next, true);
+//             } else { // different stack
+//               if (Stacks[next_stack] == NULL) {
+//                 Stacks[next_stack] = new hyp_stack();
+//                 initialize_hyp_stack(Stacks[next_stack]);
+//                 NextStacks.push(next_stack);
+//               }
+//               add_to_hyp_stack(info, Stacks[next_stack], next, false);
+//               //shrink_hyp_stack(info, Stacks[next_stack], false);
+//             }
+//           }
+//         });
+//       it = Stacks[cur_stack]->Stack.begin() + diff;
+//       it++;
+//     }
+//     Stacks[cur_stack]->Stack.clear();
+//   }
+
+//   for (auto it : Stacks) delete it.second;
+
+//   return { Goals, visited };
+// }
 
 bool force_decode_allowed(translation_info *info, vector<operation> op_seq, hypothesis* h, size_t i) {
   assert(i >= 0); assert(i < op_seq.size());
@@ -959,9 +1150,9 @@ pair< vector<hypothesis*>, vector<hypothesis*> > stack_search(translation_info *
       assert(S.size() == 1);
 
     hypothesis *h = S.top(); S.pop();
-    //cout<<endl<< "pop\t";
-    //cout << "op=" << OP_NAMES[(uint32_t)((*force_decode_op_seq)[decode_step]).first] << "\targ=(" << ((*force_decode_op_seq)[decode_step]).second.first << ", " << ((*force_decode_op_seq)[decode_step]).second.second << ")" << endl;
-    //print_hypothesis(info, h);
+    // cout<<endl<< "pop\t";
+    // cout << "op=" << OP_NAMES[(uint32_t)((*force_decode_op_seq)[decode_step]).op] << "\targ=(" << ((*force_decode_op_seq)[decode_step]).arg1 << ", " << ((*force_decode_op_seq)[decode_step]).arg2 << ")" << endl;
+    // print_hypothesis(info, h);
 
     expand_one_step(info, h, [info, &Goals, &S, force_decode_op_seq, decode_step](hypothesis*next) mutable -> void {
         if ((force_decode_op_seq == NULL) ||
@@ -970,9 +1161,9 @@ pair< vector<hypothesis*>, vector<hypothesis*> > stack_search(translation_info *
             Goals.push_back(next);
           else
             S.push(next);
-          //cout << "   added: "; print_hypothesis(info, next);
+          // cout << "   added: "; print_hypothesis(info, next);
         } else {
-          //cout << "rejected: "; print_hypothesis(info, next);
+          // cout << "rejected: "; print_hypothesis(info, next);
         }
       });
     visited.push_back(h);
@@ -1369,7 +1560,7 @@ void collect_mtus(size_t max_phrase_len, aligned_sentence_pair spair, unordered_
   }
 }
 
-aligned_sentence_pair read_next_aligned_sentence(FILE *fd, bool &is_new_document) {
+aligned_sentence_pair read_next_aligned_sentence(translation_info*info, FILE *fd, bool &is_new_document) {
   assert(! feof(fd));
 
   lexeme cnt, w,x;
@@ -1405,6 +1596,10 @@ aligned_sentence_pair read_next_aligned_sentence(FILE *fd, bool &is_new_document
   }
   nr = fscanf(fd, "\n");
 
+  compute_bleu_stats(e, &info->bleu_total_stats);
+  for (posn i=0; i<4; i++)
+    info->bleu_ref_counts[i] += info->bleu_total_stats.ng_counts[i];
+
   vector< vector<lexeme> > E;
   vector< vector<posn> > A;
 
@@ -1433,6 +1628,14 @@ aligned_sentence_pair read_next_aligned_sentence(FILE *fd, bool &is_new_document
   //cout << "E ="; for (auto vec : E) { for (auto w : vec) cout << " " << w; cout << " |"; } cout << endl;
   //cout << "A ="; for (auto vec : A) { for (auto p : vec) cout << " " << (uint32_t)p; cout << " |"; } cout << endl;
 
+  info->total_sentence_count++;
+  info->total_word_count += F.size();
+
+  if (info->total_sentence_count == info->next_sentence_print) { 
+    cerr << "processing sentence pair " << info->total_sentence_count << " (" << info->total_word_count << " words)" << endl; 
+    info->next_sentence_print *= 2; 
+  }
+
   return { F, E, A };
 }
 
@@ -1459,7 +1662,9 @@ void test_decode() {
   mtu_add_item_string(dict, 5, "C" , "c");
 
   translation_info info;
-  info.N       = 3;
+  initialize_translation_info(0, 0, info);
+
+  info.N       = 6;
   info.sent[0] = (uint32_t)'A';
   info.sent[1] = (uint32_t)'B';
   info.sent[2] = (uint32_t)'C';
@@ -1470,7 +1675,6 @@ void test_decode() {
   info.compute_cost = simple_compute_cost;
   info.language_model = NULL; // new lm::ngram::Model((char*)"file.arpa-bin");
   info.max_gaps = 5;
-  info.tm_context_len = 3;
   info.max_gap_width = 1;
   info.max_phrase_len = 5;
 
@@ -1487,18 +1691,16 @@ void test_decode() {
     // 0;
 
   info.pruning_coefficient = 0.;
-  info.recomb_buckets = new recombination_data(10231);
+  info.recomb_buckets = new recombination_data(NUM_RECOMB_BUCKETS);
 
   for (size_t rep = 0; rep < 1 + 0*999; rep++) {
     cerr<<".";
-    info.hyp_ring = initialize_hypothesis_ring(&info, INIT_HYPOTHESIS_RING_SIZE);
+    info.hyp_ring = initialize_ring<hypothesis>(INIT_HYPOTHESIS_RING_SIZE);
 
     pair< vector<hypothesis*>, vector<hypothesis*> > GoalsVisited = 
-      // for search based on amount of coverage
-      stack_generic_search(&info, [](hypothesis* hyp) { return (size_t)hyp->cov_vec_count; }, info.N*2);
-      // for search based on (hash of) coverage vector
-      //stack_generic_search(&info, [](hypothesis* hyp) { return (size_t)hyp->cov_vec_hash; }, info.N*100);
-
+      stack_generic_search(&info, 
+                           [](hypothesis* hyp) { return (size_t)hyp->cov_vec_count; },
+                           info.N*2);
 
 
     for (auto &hyp : GoalsVisited.first) {
@@ -1510,7 +1712,7 @@ void test_decode() {
       cout<<endl;
     }
 
-    free_hypothesis_ring(info.hyp_ring);
+    free_ring(info.hyp_ring, free_one_hypothesis);
   }
   cerr<<endl;
   if (info.language_model != NULL) delete info.language_model;
@@ -1550,7 +1752,7 @@ void add_all_mtus(unordered_map<mtu_item, mtu_item_info> &dst,
 }
 
 
-void extract(int argc, char*argv[]) {  // options start at argv[2]
+void extract(translation_info *info, int argc, char*argv[]) {  // options start at argv[2]
   size_t max_phrase_len = 5;
 
   if ((argc != 3) || (!strcmp(argv[2], "-h")) || (!strcmp(argv[2], "-help")) || (!strcmp(argv[2], "--help"))) {
@@ -1561,17 +1763,13 @@ void extract(int argc, char*argv[]) {  // options start at argv[2]
   FILE *fd = fopen(argv[2], "r");
   if (fd == 0) { cerr << "error: cannot open file for reading: '" << argv[2] << "'" << endl; throw exception(); }
 
-  size_t sent_id = 0;
-  size_t next_print = 100;
   unordered_map<mtu_item, mtu_item_info> all_mtus;
   unordered_map<mtu_item, mtu_item_info> cur_doc_mtus;
 
   size_t skipped_for_len = 0;
   while (!feof(fd)) {
-    sent_id++; if (sent_id == next_print) { cerr << "reading sentence pair " << sent_id << endl; next_print *= 2; }
-
     bool is_new_document = false;
-    aligned_sentence_pair spair = read_next_aligned_sentence(fd, is_new_document);
+    aligned_sentence_pair spair = read_next_aligned_sentence(info, fd, is_new_document);
     if (is_new_document) {
       add_all_mtus(all_mtus, cur_doc_mtus);
       cur_doc_mtus.clear();
@@ -1587,7 +1785,7 @@ void extract(int argc, char*argv[]) {  // options start at argv[2]
   print_mtu_set(all_mtus, true);
 }
 
-void oracle(int argc, char*argv[]) {  // options start at argv[2]
+void oracle(translation_info*info, int argc, char*argv[]) {  // options start at argv[2]
   if ((argc != 4) || (!strcmp(argv[2], "-h")) || (!strcmp(argv[2], "-help")) || (!strcmp(argv[2], "--help"))) {
     cout << "usage: ngdec oracle [mtu file] [ngdec file] > [opseq file]" << endl;
     exit(-1);
@@ -1601,14 +1799,9 @@ void oracle(int argc, char*argv[]) {  // options start at argv[2]
   fd = fopen(argv[3], "r");
   if (fd == 0) { cerr << "error: cannot open ngdec file for reading: '" << argv[3] << "'" << endl; throw exception(); }
 
-  size_t sent_id = 0;
-  size_t next_print = 100;
-
   while (!feof(fd)) {
-    sent_id++; if (sent_id == next_print) { cerr << "reading sentence pair " << sent_id << endl; next_print *= 2; }
-
     bool is_new_document = false;
-    aligned_sentence_pair spair = read_next_aligned_sentence(fd, is_new_document);
+    aligned_sentence_pair spair = read_next_aligned_sentence(info, fd, is_new_document);
     if (is_new_document) cout << endl;
     vector<operation> op_seq;
 
@@ -1620,7 +1813,7 @@ void oracle(int argc, char*argv[]) {  // options start at argv[2]
   free_dict(dict);
 }
 
-void predict_forced(int argc, char*argv[]) {  // options start at argv[2]
+void predict_forced(translation_info *info, int argc, char*argv[]) {  // options start at argv[2]
   if ((argc != 4) || (!strcmp(argv[2], "-h")) || (!strcmp(argv[2], "-help")) || (!strcmp(argv[2], "--help"))) {
     cout << "usage: ngdec predict-forced [mtu file] [ngdec file] > [predictions]" << endl;
     exit(-1);
@@ -1634,57 +1827,48 @@ void predict_forced(int argc, char*argv[]) {  // options start at argv[2]
   fd = fopen(argv[3], "r");
   if (fd == 0) { cerr << "error: cannot open ngdec file for reading: '" << argv[3] << "'" << endl; throw exception(); }
 
-  size_t sent_id = 0;
-  size_t next_print = 100;
-
-  translation_info info;
-  info.compute_cost = simple_compute_cost;
-  info.language_model = NULL;
-  info.operation_allowed = (1 << OP_MAXIMUM) - 1;  // all operations
-  info.pruning_coefficient = 0.;
-  info.recomb_buckets = new recombination_data(10231);
-  info.max_gaps = 5;
-  info.tm_context_len = 3;
-  info.max_gap_width = 1;
-  info.max_phrase_len = 5;
-
   while (!feof(fd)) {
-    sent_id++; if (sent_id == next_print) { cerr << "reading sentence pair " << sent_id << endl; next_print *= 2; }
-
     bool is_new_document = false;
-    aligned_sentence_pair spair = read_next_aligned_sentence(fd, is_new_document);
+    aligned_sentence_pair spair = read_next_aligned_sentence(info, fd, is_new_document);
+    //cout << '|' << bleu_ref_counts[0] << '|' << bleu_ref_counts[1] << '|' << bleu_ref_counts[2] << '|' << bleu_ref_counts[3] << "\t";
+
     if (is_new_document) cout << endl;
     vector<operation> op_seq;
 
     op_seq = get_operation_sequence(spair, &dict);
 
-    info.N = spair.F.size();
-    for (posn i=0; i<info.N; i++)
-      info.sent[i] = spair.F[i];
-    build_sentence_mtus(&info, dict);
-    info.hyp_ring = initialize_hypothesis_ring(&info, INIT_HYPOTHESIS_RING_SIZE);
+    info->N = spair.F.size();
+    for (posn i=0; i<info->N; i++)
+      info->sent[i] = spair.F[i];
+    build_sentence_mtus(info, dict);
+    info->hyp_ring = initialize_ring<hypothesis>(INIT_HYPOTHESIS_RING_SIZE);
 
-    pair< vector<hypothesis*>, vector<hypothesis*> > GoalsVisited = stack_search(&info, &op_seq);
+    pair< vector<hypothesis*>, vector<hypothesis*> > GoalsVisited = stack_search(info, &op_seq);
 
     if (GoalsVisited.first.size() == 0)
       cout<<"FAIL"<<endl;
-    else
+    else {
       for (auto &hyp : GoalsVisited.first) {
-        vector<lexeme> trans = get_translation(&info, hyp);
+        vector<lexeme> trans = get_translation(info, hyp);
+        update_bleu_stats(info, trans);
+
         cout<<hyp->cost<<"\t";
-        for (auto &w : get_translation(&info, hyp))
+        for (auto &w : trans)
           cout<<" "<<w;
         cout<<endl;
         break;
       }
+    }
     
-    free_sentence_mtus(info.mtus_at);
-    free_hypothesis_ring(info.hyp_ring);
+    free_sentence_mtus(info->mtus_at);
+    free_ring(info->hyp_ring, free_one_hypothesis);
   }
   fclose(fd);
 
-  if (info.language_model != NULL) delete info.language_model;
-  delete info.recomb_buckets;
+  compute_overall_bleu(info, true);
+
+  if (info->language_model != NULL) delete info->language_model;
+  delete info->recomb_buckets;
   free_dict(dict);
 }
 
@@ -1702,11 +1886,14 @@ size_t bitset_hash(bitset<N> bs) {
 }
 
 
-void predict_lm(int argc, char*argv[]) {  // options start at argv[2]
+void predict_lm(translation_info *info, int argc, char*argv[]) {  // options start at argv[2]
   if ((argc != 6) || (!strcmp(argv[2], "-h")) || (!strcmp(argv[2], "-help")) || (!strcmp(argv[2], "--help"))) {
     cout << "usage: ngdec predict-lm [en lm file] [opseq lm file] [mtu file] [ngdec file] > [predictions]" << endl;
     exit(-1);
   }
+
+  info->language_model = new lm::ngram::Model(argv[2]);
+  info->opseq_model    = new lm::ngram::Model(argv[3]);
 
   FILE *fd = fopen(argv[4], "r");
   if (fd == 0) { cerr << "error: cannot open mtu file for reading: '" << argv[4] << "'" << endl; throw exception(); }
@@ -1716,42 +1903,25 @@ void predict_lm(int argc, char*argv[]) {  // options start at argv[2]
   fd = fopen(argv[5], "r");
   if (fd == 0) { cerr << "error: cannot open ngdec file for reading: '" << argv[5] << "'" << endl; throw exception(); }
 
-  size_t sent_id = 0;
-  size_t next_print = 100;
-
-  translation_info info;
-  info.compute_cost = simple_compute_cost;
-  info.language_model = new lm::ngram::Model(argv[2]);
-  info.opseq_model    = new lm::ngram::Model(argv[3]);
-  info.operation_allowed = (1 << OP_MAXIMUM) - 1;  // all operations
-  //info.operation_allowed &= ~(1 << OP_GEN_S); // turn off OP_GEN_S
-  info.gen_s_cost = 10.;
-  info.gap_cost   = 10.;
-  info.pruning_coefficient = 10.;  // prune anything more than X* as bad as the best thing
-  info.max_bucket_size = 500;
-  info.recomb_buckets = new recombination_data(10231);
-  info.max_gaps = 10;
-  info.max_gap_width = 16;
-  info.max_phrase_len = 5;
-
   while (!feof(fd)) {
-    sent_id++; if (sent_id == next_print) { cerr << "reading sentence pair " << sent_id << endl; next_print *= 2; }
-
     bool is_new_document = false;
-    aligned_sentence_pair spair = read_next_aligned_sentence(fd, is_new_document);
+    aligned_sentence_pair spair = read_next_aligned_sentence(info, fd, is_new_document);
     if (is_new_document) cout << endl;
 
-    info.N = spair.F.size();
-    for (posn i=0; i<info.N; i++)
-      info.sent[i] = spair.F[i];
-    build_sentence_mtus(&info, dict);
-    info.hyp_ring = initialize_hypothesis_ring(&info, INIT_HYPOTHESIS_RING_SIZE);
+    info->N = spair.F.size();
+    for (posn i=0; i<info->N; i++)
+      info->sent[i] = spair.F[i];
+    build_sentence_mtus(info, dict);
+
+    info->hyp_ring = initialize_ring<hypothesis>(INIT_HYPOTHESIS_RING_SIZE);
+    info->lm_state_ring = initialize_ring<lm::ngram::State>(INIT_HYPOTHESIS_RING_SIZE);
+    info->tm_state_ring = initialize_ring<lm::ngram::State>(INIT_HYPOTHESIS_RING_SIZE);
 
     pair< vector<hypothesis*>, vector<hypothesis*> > GoalsVisited = 
-      stack_generic_search(&info, [](hypothesis* hyp) { 
+      stack_generic_search(info, [](hypothesis* hyp) { 
           return (size_t)hyp->cov_vec_count * 2 + ((hyp->n != hyp->Z) || (!is_covered(hyp, hyp->n)));
           //return bitset_hash(*hyp->cov_vec);
-        }, info.N*2);
+        }, info->N*2);
 
     if (GoalsVisited.first.size() == 0)
       cout<<"FAIL"<<endl;
@@ -1763,24 +1933,29 @@ void predict_lm(int argc, char*argv[]) {  // options start at argv[2]
       }
 
       hypothesis*hyp = GoalsVisited.first[best_hyp_id];
-      vector<lexeme> trans = get_translation(&info, hyp);
+      vector<lexeme> trans = get_translation(info, hyp);
+      update_bleu_stats(info, trans);
       cout<<hyp->cost<<"\t";
-      for (auto &w : get_translation(&info, hyp))
+      for (auto &w : get_translation(info, hyp))
         cout<<" "<<w;
       cout<<endl;
 
-      //for (hypothesis* par=hyp; par!=NULL; par=par->prev) { cerr <<"     from: "; print_hypothesis(&info, par); } cerr<<endl;
+      //for (hypothesis* par=hyp; par!=NULL; par=par->prev) { cerr <<"     from: "; print_hypothesis(info, par); } cerr<<endl;
 
     }
     
-    free_sentence_mtus(info.mtus_at);
-    free_hypothesis_ring(info.hyp_ring);
+    free_sentence_mtus(info->mtus_at);
+    free_ring(info->hyp_ring, free_one_hypothesis);
+    free_ring(info->lm_state_ring);
+    free_ring(info->tm_state_ring);
   }
   fclose(fd);
 
-  if (info.language_model != NULL) delete info.language_model;
-  if (info.opseq_model != NULL) delete info.opseq_model;
-  delete info.recomb_buckets;
+  compute_overall_bleu(info, true);
+
+  if (info->language_model != NULL) delete info->language_model;
+  if (info->opseq_model != NULL) delete info->opseq_model;
+  delete info->recomb_buckets;
   free_dict(dict);
 }
 
@@ -1817,26 +1992,24 @@ namespace StolenFromKenLM {
   float FloatSec(const struct timeval &tv) {
     return static_cast<float>(tv.tv_sec) + (static_cast<float>(tv.tv_usec) / 1000000.0);
   }
-  void print_system_usage(timespec started_timespec) {
+  void print_system_usage(translation_info *info, timespec started_timespec) {
     std::ifstream status("/proc/self/status", std::ios::in);
     string header, value;
+    cerr<<"memory:";
     while ((status >> header) && getline(status, value)){
       if ((header == "VmPeak:") || (header == "VmRSS:"))
-        cerr << header << skip_spaces(value.c_str()) << "\t";
+        cerr << "\t" << header << " " << skip_spaces(value.c_str());
     }
-    /*
-    struct rusage usage;
-    if (getrusage(RUSAGE_CHILDREN, &usage))
-      throw exception();
-    cerr << "RSSMax:" << usage.ru_maxrss<< " kB\t";
-    cerr << "user:" << FloatSec(usage.ru_utime) << "\tsys:" << FloatSec(usage.ru_stime) << '\t';
-    cerr << "CPU:" << (FloatSec(usage.ru_utime) + FloatSec(usage.ru_stime));
-    cerr << "\t";
-    */
+    cerr << endl;
+
+    cerr << "time  :";
 
     struct timespec current_timespec;
     clock_gettime(CLOCK_MONOTONIC, &current_timespec);
-    cerr << "time:" << (FloatSec(current_timespec) - FloatSec(started_timespec)) << "s" << endl;
+    float total = FloatSec(current_timespec) - FloatSec(started_timespec);
+    float sent_per_sec = ((float)info->total_sentence_count) / total;
+    float word_per_sec = ((float)info->total_word_count) / total;
+    cerr << "\ttotal: " << total << "s" << "\tsent/s: " << sent_per_sec << "\tword/s: " << word_per_sec << endl;
   }
 }
   
@@ -1844,21 +2017,24 @@ namespace StolenFromKenLM {
 int main(int argc, char*argv[]) {
   if (argc < 2) usage();
 
+  translation_info info;
+  initialize_translation_info(argc-2, argv+2, info);
+
   timespec started_timespec;
   clock_gettime(CLOCK_MONOTONIC, &started_timespec);
 
-  if      (!strcmp(argv[1], "extract"       )) { extract       (argc, argv); }
-  else if (!strcmp(argv[1], "oracle"        )) { oracle        (argc, argv); }
-  else if (!strcmp(argv[1], "predict-forced")) { predict_forced(argc, argv); }
-  else if (!strcmp(argv[1], "predict-lm"    )) { predict_lm    (argc, argv); }
+
+  if      (!strcmp(argv[1], "extract"       )) { extract       (&info, argc, argv); }
+  else if (!strcmp(argv[1], "oracle"        )) { oracle        (&info, argc, argv); }
+  else if (!strcmp(argv[1], "predict-forced")) { predict_forced(&info, argc, argv); }
+  else if (!strcmp(argv[1], "predict-lm"    )) { predict_lm    (&info, argc, argv); }
   else { usage(); }
   //test_align();
-  //test_decode();
   //test_lm();
   //test_big_decode(argv[1], false);
   //main_collect_mtus(argv[1]);
 
-  StolenFromKenLM::print_system_usage(started_timespec);
+  StolenFromKenLM::print_system_usage(&info, started_timespec);
 
   return 0;
 }
