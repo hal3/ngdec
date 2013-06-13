@@ -31,7 +31,8 @@ using namespace std;
 #define OP_JUMP_E    9
 #define OP_MAXIMUM   10
 
-string OP_NAMES[OP_MAXIMUM] = { "OP_UNKNOWN", "OP_INIT", "OP_GEN_ST", "OP_CONT_W", "OP_CONT_G", "OP_GEN_S", "OP_GEN_T", "OP_GAP", "OP_JUMP_B", "OP_JUMP_E" };
+string OP_NAMES[OP_MAXIMUM] = { "OP_UNKNOWN", "OP_INIT", "OP_GEN_ST", "OP_CONT_WORD", "OP_CONT_GAP", "OP_GEN_S", "OP_GEN_T", "OP_GAP", "OP_JUMP_B", "OP_JUMP_E" };
+char   OP_CHAR[OP_MAXIMUM+1]  = "?0GwgST_JE";   // =1 for \0
 
 typedef unsigned short posn;   // should be large enough to store MAX_SENTENCE_LENGTH
 typedef lm::WordIndex lexeme;
@@ -74,8 +75,6 @@ struct mtu_item {
         return false;
     return true;
   }
-
-  
 };
 
 struct mtu_for_sent {
@@ -92,7 +91,7 @@ struct hypothesis {
   size_t                op_argument;  // relevant argument to operation (optional, default = 0)
   posn queue_head;                    // which word in cur_mtu is "next"
   
-  bitset<MAX_SENTENCE_LENGTH> *cov_vec;
+  bitset<MAX_SENTENCE_LENGTH> cov_vec;
   posn cov_vec_count;
   uint32_t cov_vec_hash;
 
@@ -112,6 +111,7 @@ struct hypothesis {
 
   float   cost;
   hypothesis * prev;
+  vector<hypothesis*> next;
 };
   
 
@@ -178,11 +178,17 @@ struct translation_info {
   size_t   max_gaps;
   size_t   max_gap_width;
   size_t   max_phrase_len;  // must be <= MAX_PHRASE_LEN
+  size_t   num_kbest_predictions;
 
   // status
   size_t total_sentence_count;
   size_t total_word_count;
   size_t next_sentence_print;
+};
+
+struct astar_item {
+  hypothesis * me;
+  astar_item * parent;
 };
 
 struct hyp_stack {

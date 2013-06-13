@@ -1,4 +1,6 @@
-ARCH = $(shell test `g++ -v 2>&1 | tail -1 | cut -d ' ' -f 3 | cut -d '.' -f 1,2` \< 4.3 && echo -march=nocona || echo -march=native)  -std=c++0x
+G++ = g++
+
+ARCH = $(shell test `${G++} -v 2>&1 | tail -1 | cut -d ' ' -f 3 | cut -d '.' -f 1,2` \< 4.3 && echo -march=nocona || echo -march=native)  -std=c++0x
 OPTIM_FLAGS = -O3 -ffast-math -fno-strict-aliasing -fomit-frame-pointer 
 
 KENLM_DIR = /home/hal/download/kenlm
@@ -8,7 +10,7 @@ KENLM_FLAGS = -I$(KENLM_DIR) -DKENLM_MAX_ORDER=9
 FLAGS = $(KENLM_FLAGS) $(ARCH) -Wall $(OPTIM_FLAGS) -D_FILE_OFFSET_BITS=64
 
 # for "fast" profiling
-FLAGS = $(KENLM_FLAGS) -Wall $(ARCH) -D_FILE_OFFSET_BITS=64 -pg -O3 -ffast-math -fno-strict-aliasing
+#FLAGS = $(KENLM_FLAGS) -Wall $(ARCH) -D_FILE_OFFSET_BITS=64 -pg -O3 -ffast-math -fno-strict-aliasing
 
 # for profiling/debugging
 #FLAGS = $(KENLM_FLAGS) -Wall $(ARCH) -D_FILE_OFFSET_BITS=64 -g -pg
@@ -20,13 +22,13 @@ FLAGS = $(KENLM_FLAGS) -Wall $(ARCH) -D_FILE_OFFSET_BITS=64 -pg -O3 -ffast-math 
 #FLAGS = $(KENLM_FLAGS) -Wall $(ARCH) -D_FILE_OFFSET_BITS=64 -g $(OPTIM_FLAGS)
 
 %.o:	%.cc %.h
-	g++ $(FLAGS) -I/usr/include -c $< -o $@
+	${G++} $(FLAGS) -I/usr/include -c $< -o $@
 
 %.o:	%.cc
-	g++ $(FLAGS) -I/usr/include -c $< -o $@
+	${G++} $(FLAGS) -I/usr/include -c $< -o $@
 
 ngdec: ngdec.o
-	g++ $(FLAGS) -o $@ $< kenlm.a -lrt 
+	${G++} $(FLAGS) -o $@ $< ${KENLM_DIR}/kenlm.a -lrt 
 
 clean:
 	rm -f *.o ngdec
