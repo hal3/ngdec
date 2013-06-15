@@ -13,11 +13,12 @@ using namespace std;
 
 #define INIT_HYPOTHESIS_RING_SIZE 1024
 
-#define MAX_SENTENCE_LENGTH   200
+#define MAX_SENTENCE_LENGTH   100
 #define NUM_MTU_OPTS           10
 #define MAX_VOCAB_SIZE   10000000
 #define MAX_PHRASE_LEN         10
-#define NUM_RECOMB_BUCKETS  10231
+#define NUM_RECOMB_BUCKETS   1023
+#define MAX_GAPS_TOTAL         32
 
 #define OP_UNKNOWN   0
 #define OP_INIT      1
@@ -32,9 +33,9 @@ using namespace std;
 #define OP_MAXIMUM   10
 
 string OP_NAMES[OP_MAXIMUM] = { "OP_UNKNOWN", "OP_INIT", "OP_GEN_ST", "OP_CONT_WORD", "OP_CONT_GAP", "OP_GEN_S", "OP_GEN_T", "OP_GAP", "OP_JUMP_B", "OP_JUMP_E" };
-char   OP_CHAR[OP_MAXIMUM+1]  = "?0GwgST_JE";   // =1 for \0
+char   OP_CHAR[OP_MAXIMUM+1]  = "?0GwgST_JE";   // +1 for \0
 
-typedef unsigned short posn;   // should be large enough to store MAX_SENTENCE_LENGTH
+typedef unsigned short posn;   // should be large enough to store MAX_SENTENCE_LENGTH+1
 typedef lm::WordIndex lexeme;
 typedef uint32_t mtuid;
 typedef uint32_t gap_op_t;
@@ -97,13 +98,13 @@ struct hypothesis {
 
   posn n;                             // current position in src
   posn Z;                             // right-most position in src
-  set<posn> * gaps;                   // where are the existing gaps
+  bitset<MAX_SENTENCE_LENGTH> * gaps;
   bool gaps_alloc;
+  posn gaps_count;
 
   lm::ngram::State * lm_context;
   uint32_t lm_context_hash;
 
-  //mtuid * tm_context;
   lm::ngram::State * tm_context;
   uint32_t tm_context_hash;
 
@@ -179,6 +180,7 @@ struct translation_info {
   size_t   max_gap_width;
   size_t   max_phrase_len;  // must be <= MAX_PHRASE_LEN
   size_t   num_kbest_predictions;
+  size_t   max_mtus_per_token;
 
   // status
   size_t total_sentence_count;

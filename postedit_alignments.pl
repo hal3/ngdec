@@ -1,7 +1,19 @@
 #!/usr/bin/perl -w
 use strict;
 
-my $FNAME = shift or die;
+my $TGT_IN;
+my $AL_IN;
+my $OUTF;
+if (@ARGV == 3) {
+    $TGT_IN = shift;
+    $AL_IN = shift;
+    $OUTF = shift;
+} elsif (@ARGV == 1) {
+    my $FNAME = shift;
+    $TGT_IN = "$FNAME.en";
+    $AL_IN = "$FNAME.al";
+    $OUTF = "$FNAME.al.pe";
+}
 
 # first, we need to find which target (EN) words are ever unaligned
 # and compute their neighbor frequencies, and also get EN word
@@ -11,11 +23,11 @@ my %enFreq = ();
 my %neighbors = ();
 my $numUnaligned = 0;
 my $enTokenCount = 0;
-open EN, "$FNAME.en" or die;
-open AL, "$FNAME.al" or die;
+open EN, "$TGT_IN" or die;
+open AL, "$AL_IN" or die;
 while (my $en = <EN>) {
     my $al = <AL>;
-    if (not defined $al) { die "$FNAME.al has fewer lines than $FNAME.en"; }
+    if (not defined $al) { die "$AL_IN has fewer lines than $TGT_IN"; }
     chomp $en; my @en = split /\s+/, $en;
     chomp $al; my @al = split /\s+/, $al;
     my %hit = ();
@@ -39,7 +51,7 @@ while (my $en = <EN>) {
         }
     }
 }
-while (<AL>) { die "$FNAME.al has more lines than $FNAME.en"; }
+while (<AL>) { die "$AL_IN has more lines than $TGT_IN"; }
 close EN or die;
 close AL or die;
 
@@ -52,12 +64,12 @@ my $countConsecutive = 0;
 my $countNonConsecutive = 0;
 my $totalFixed = 0;
 my $sentenceID = 0;
-open EN, "$FNAME.en" or die;
-open AL, "$FNAME.al" or die;
-open O,  "> $FNAME.al.pe" or die;
+open EN, "$TGT_IN" or die;
+open AL, "$AL_IN" or die;
+open O,  "> $OUTF" or die;
 while (my $en = <EN>) {
     my $al = <AL>;
-    if (not defined $al) { die "$FNAME.al has fewer lines than $FNAME.en"; }
+    if (not defined $al) { die "$AL_IN has fewer lines than $TGT_IN"; }
     chomp $en; my @en = split /\s+/, $en;
     chomp $al; my @al = split /\s+/, $al;
     $sentenceID++;
@@ -181,7 +193,7 @@ while (my $en = <EN>) {
     }
     print O "\n";
 }
-while (<AL>) { die "$FNAME.al has more lines than $FNAME.en"; }
+while (<AL>) { die "$AL_IN has more lines than $TGT_IN"; }
 close EN or die;
 close AL or die;
 close O  or die;

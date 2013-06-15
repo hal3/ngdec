@@ -7,7 +7,7 @@
  1. Download and install the kenlm source somewhere
 
  2a. (OPTIONAL) compile kenlm with larger LM limit:
-                  --max-kenlm-order=9
+                  ./bjam --max-kenlm-order=9
 
  2b. (REQUIRED) Run his ./compile_query_only.sh ... you should 
      definitely switch the max order to at least 9 in the shell
@@ -17,12 +17,10 @@
  3. Create a kenlm archive by running:
     ar rvs kenlm.a util/double-conversion/bignum.o util/double-conversion/bignum-dtoa.o util/double-conversion/cached-powers.o util/double-conversion/diy-fp.o util/double-conversion/double-conversion.o util/double-conversion/fast-dtoa.o util/double-conversion/fixed-dtoa.o util/double-conversion/strtod.o util/bit_packing.o util/ersatz_progress.o util/exception.o util/file.o util/file_piece.o util/mmap.o util/murmur_hash.o util/pool.o util/read_compressed.o util/scoped.o util/string_piece.o util/usage.o lm/bhiksha.o lm/binary_format.o lm/config.o lm/lm_exception.o lm/model.o lm/quantize.o lm/read_arpa.o lm/search_hashed.o lm/search_trie.o lm/sizes.o lm/trie.o lm/trie_sort.o lm/value_build.o lm/virtual_interface.o lm/vocab.o
 
- 4. Copy this archive (kenlm.a) to the ngdec directory
-
 -- Edit our Makefile --
 
  1. Change KENLM_DIR to point to where you downloaded kenlm
-      ($KENLM_DIR/lm must exist)
+      ($KENLM_DIR/lm and $KENLM_DIR/kenlm.a must exist)
  2. Change anything else you want
 
 -- Building and running ngdec --
