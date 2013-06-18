@@ -15,6 +15,7 @@
 namespace ng=lm::ngram;
 
 #define MAX(a,b) (((a)>(b))?(a):(b))
+#define MIN(a,b) (((a)<(b))?(a):(b))
 
 namespace std {
   template <> struct hash<mtu_item> : public unary_function<mtu_item, size_t> {
@@ -109,7 +110,7 @@ char* ensure_argument(int argc, char*argv[], int&i) {
   }
 }
 
-void turn_off_bit(size_t &data, size_t bit) {
+void turn_off_bit(uint32_t &data, size_t bit) {
   data &= ~(1<<bit);
 }
 
@@ -133,13 +134,17 @@ int initialize_translation_info(int argc, char*argv[], translation_info&info) {
   info.operation_allowed = (1 << OP_MAXIMUM) - 1;  // all operations
   info.pruning_coefficient = 10.;
   info.max_bucket_size = 500;
-  info.gen_s_cost = 10;
-  info.gap_cost = 10;
   info.max_gaps = 5;
   info.max_gap_width = 16;
   info.max_phrase_len = 5;
   info.num_kbest_predictions = 1;
   info.max_mtus_per_token = 8;
+
+  info.gen_s_cost = 10;
+  info.gap_cost = 10;
+  info.tm_cost = 1;
+  info.lm_cost = 1;
+  info.brevity_cost = 1;
 
   info.total_sentence_count = 0;
   info.total_word_count = 0;
@@ -161,6 +166,13 @@ int initialize_translation_info(int argc, char*argv[], translation_info&info) {
     else if (strcmp(argv[i], "--kbest"      ) == 0) info.num_kbest_predictions = atoi(ensure_argument(argc, argv, i));
     else if (strcmp(argv[i], "--next_print" ) == 0) info.next_sentence_print = atoi(ensure_argument(argc, argv, i));
     else if (strcmp(argv[i], "--max_mtus"   ) == 0) info.max_mtus_per_token  = atoi(ensure_argument(argc, argv, i));
+    else if (strcmp(argv[i], "--costs"      ) == 0) {
+      info.gen_s_cost   = atof(ensure_argument(argc, argv, i));
+      info.gap_cost     = atof(ensure_argument(argc, argv, i));
+      info.tm_cost      = atof(ensure_argument(argc, argv, i));
+      info.lm_cost      = atof(ensure_argument(argc, argv, i));
+      info.brevity_cost = atof(ensure_argument(argc, argv, i));
+    }
     else break;
   }
 
@@ -306,7 +318,7 @@ void print_hypothesis(translation_info* info, hypothesis *h) {
   cerr << "\tqhd="<<h->queue_head;
   cerr << "\tn="<<h->n;
   cerr << "\tZ="<<h->Z;
-  cerr << "\tc "<<h->cov_vec<<" "<<h->cov_vec_count<<"="; 
+  cerr << "\tc "/* <<h->cov_vec */<<" "<<h->cov_vec_count<<"="; 
   if (info == NULL) print_coverage(h->cov_vec, h->Z, h->Z);
   else print_coverage(h->cov_vec, info->N, h->Z);
   cerr << "\t#g="<<h->gaps_count;
@@ -332,8 +344,10 @@ void set_covered(hypothesis *h, posn n) {
 void free_one_hypothesis(hypothesis*h) {
   //if (h->tm_context)       delete h->tm_context;
   //if (h->lm_context)       delete h->lm_context;
-  if (h->gaps_alloc)       delete h->gaps;
   //if (h->cov_vec)          delete h->cov_vec;
+  if (h->gaps_alloc)       delete h->gaps;
+  //if (h->next)             delete h->next;
+  if (h->recomb_friends) delete h->recomb_friends;
 }
 
 template<class T> void free_ring(ring<T>*r, void(*delete_T)(T*)) {
@@ -410,9 +424,12 @@ hypothesis* get_next_hypothesis(translation_info*info, hypothesis *h) {
     //h2->tm_context = new ng::State(info->opseq_model->BeginSentenceState());
     if (info->opseq_model != NULL)
       h2->tm_context_hash = ng::hash_value(info->opseq_model->BeginSentenceState());
-    h2->skippable = false;
-    h2->cost = 1.;
+    h2->pruned = false;
+    h2->cost = 0.;
     h2->prev = NULL;
+    //h2->next = NULL;
+    h2->recomb_friends = NULL;
+    h2->recombined = false;
   } else {
     memcpy(h2, h, sizeof(hypothesis));
     h2->last_op = OP_UNKNOWN;
@@ -422,8 +439,11 @@ hypothesis* get_next_hypothesis(translation_info*info, hypothesis *h) {
       h2->lm_context = get_next_ring_element(info->lm_state_ring);
     if (info->opseq_model != NULL)
       h2->tm_context = get_next_ring_element(info->tm_state_ring);
-    h2->skippable = false;
+    h2->pruned = false;
     h2->prev = h;
+    //h2->next = NULL;
+    h2->recomb_friends = NULL;
+    h2->recombined = false;
   }
 
   return h2;
@@ -553,11 +573,10 @@ bool prepare_for_add(translation_info*info, hypothesis*h) {
       ng::State in_state = h->prev->tm_context ? *(h->prev->tm_context) : ng::State(info->opseq_model->BeginSentenceState());
       float log_prob = info->opseq_model->Score(in_state, this_op, *h->tm_context);
       h->tm_context_hash = ng::hash_value(*h->tm_context);
-      h->cost -= log_prob;
+      h->cost -= log_prob * info->tm_cost;
+    } else {
+      h->cost ++;
     }
-
-    if (info->num_kbest_predictions > 1)
-      h->prev->next.push_back(h);
 
     return true;
   } else {
@@ -577,10 +596,14 @@ void shift_lm_context(translation_info* info, hypothesis *h, posn M, lexeme*tgt)
   }
   h->lm_context_hash = ng::hash_value(*h->lm_context);
 
-  h->cost -= log_prob;
+  h->cost -= log_prob * info->lm_cost;
 }
 
 template<class T> bool contains(set<T>* S, T t) {
+  return S->find(t) != S->end();
+}
+
+template<class T> bool unordered_contains(unordered_set<T>* S, T t) {
   return S->find(t) != S->end();
 }
 
@@ -613,7 +636,7 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
           if (here > MAX_SENTENCE_LENGTH) break;
           if (here >= h->n + info->max_gap_width) break;
 
-          if (is_ok_lex_position(info, h, n, idx, here) && (h->gaps_count < info->max_gaps)) { // TODO: figure out why I wrote the following: && (h->gaps_count < num_uncovered)) {
+          if (is_ok_lex_position(info, h, n, idx, here) && (h->gaps_count < info->max_gaps)) {
 
             hypothesis *h2 = get_next_hypothesis(info, h);
             h2->last_op = OP_CONT_WORD;
@@ -673,6 +696,7 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
         h2->cur_mtu = mtu;
         h2->queue_head = 1;
         shift_lm_context(info, h2, mtu->mtu->tgt_len, mtu->mtu->tgt);
+        //h2->cost -= info->brevity_cost * static_cast<float>(mtu->mtu->tgt_len);
 
         if (prepare_for_add(info, h2)) add_operation(h2);
       }
@@ -681,7 +705,7 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
 
   if (((info->operation_allowed & (1 << OP_GAP)) > 0) && 
       (h->gaps_count < info->max_gaps) && (!last_op_was_gap) && (n<N) && (!is_covered(h,n)) && (!(*h->gaps)[n]) && queue_empty &&
-      (h->gaps_count < num_uncovered)) {  // TODO: be sure this was actually a bad idea
+      (h->gaps_count < num_uncovered)) {
     //cout << "inserting gap at n=" << h->n <<" Z="<<h->Z<<endl;
     hypothesis *h2 = get_next_hypothesis(info, h);
     h2->last_op = OP_GAP;
@@ -754,52 +778,109 @@ bool is_final_hypothesis(translation_info *info, hypothesis *h) {
   return true;
 }
 
-/*
+
 class astar_hypothesis_lt {
 public:
-  bool operator()(astar_item& a, astar_item& b) { // true if a<b
-    return false;
+  bool operator()(astar_item* a, astar_item* b) { // true if a<b
+    return (a->path_cost_to_end + a->future_cost_to_start) > 
+           (b->path_cost_to_end + b->future_cost_to_start);
   }
 };
 
-typedef priority_queue<astar_item,vector<astar_item>,astar_hypothesis_lt> astar_pqueue;
+typedef priority_queue<astar_item*,vector<astar_item*>,astar_hypothesis_lt> astar_pqueue;
 
-void compute_future_cost(hypothesis* h, float future_cost, unordered_set<hypothesis*> initial_items) {
-  h->cost_future = future_cost;
-  if (h->prev == NULL) {
-    initial_items.insert(h);
-    return;
+vector<lexeme> get_astar_translation(translation_info*info, astar_item *item) {
+  vector<lexeme> ret;
+  for (; item != NULL; item = item->parent) {
+    hypothesis*h = item->me;
+    if (h->last_op == OP_GEN_ST)
+      if (h->cur_mtu->mtu->tgt_len == 0) // COPY
+        ret.push_back( info->sent[h->n] );  // TODO: this is kind of broken :(
+      else
+        for (posn i=0; i<h->cur_mtu->mtu->tgt_len; ++i)
+          ret.push_back(h->cur_mtu->mtu->tgt[i]);
+    else if (h->last_op == OP_GEN_T)
+      ret.push_back(h->cur_mtu->mtu->tgt[0]);
   }
-  float step_cost = h->cost - h->prev->cost;
+  return ret;
 }
 
-void astar_kbest_search(translation_info*info, vector<hypothesis*> Goals) {
+vector< pair< float,vector<lexeme> > > astar_kbest_search(translation_info*info, vector<hypothesis*> Goals) {
+  vector< pair< float,vector<lexeme> > > found_items;
   astar_pqueue Q;
-  vector<astar_item> final_items;
-  unordered_set<hypothesis*> initial_items;
+  size_t num_final_in_Q = 0;
+  float highest_cost_in_Q = FLT_MIN;
+  unordered_set<astar_item*> visited;
 
-  for (hypothesis* h : Goals)
-    compute_future_cost(h, 0., initial_items);
-
-  for (hypothesis* h0: initial_items)
-    Q.push( { h0, NULL } );
+  for (hypothesis *h_end : Goals) {
+    astar_item *item = new astar_item();
+    item->me = h_end;
+    item->path_cost_to_end = 0;
+    item->future_cost_to_start = h_end->cost;
+    item->parent = NULL;
+    Q.push(item);
+    highest_cost_in_Q = MAX(highest_cost_in_Q, item->path_cost_to_end + item->future_cost_to_start);
+    if (item->me->prev == NULL) num_final_in_Q++;
+  }
 
   while (!Q.empty()) {
-    astar_item item = Q.top(); Q.pop();  // this is the highest priority item
-    if (is_final_hypothesis(info, item.me)) {
-      final_items.push_back(item);
-      if (final_items.size() >= info->num_kbest_predictions)
+    astar_item *item = Q.top(); Q.pop();
+    hypothesis *h = item->me;
+    assert( h != NULL );
+    if (h->pruned) { delete item; continue; }
+    if (unordered_contains(&visited, item)) continue;
+    visited.insert(item);
+
+    if (h->prev == NULL) {  // this is an initial item
+      found_items.push_back( { item->path_cost_to_end, 
+                               get_astar_translation(info, item) } );
+      if (found_items.size() >= info->num_kbest_predictions)
         break;
-    } else
-      for (size_t id=0; id<item.me->next.size(); id++) {
-        astar_item item = { item.me->next[id], &item };
-        Q.push( item );
+    } else {  // this is not a final item
+      // the first predecessor is "prev"
+      if (! h->prev->pruned) {
+        astar_item *new_item = new astar_item();
+        new_item->me = h->prev;
+        new_item->path_cost_to_end = item->path_cost_to_end + h->cost - h->prev->cost;
+        new_item->future_cost_to_start = h->prev->cost;
+        new_item->parent = item;
+        if ((num_final_in_Q < info->num_kbest_predictions) || (new_item->path_cost_to_end + new_item->future_cost_to_start < highest_cost_in_Q)) {
+          Q.push(new_item);
+          highest_cost_in_Q = MAX(highest_cost_in_Q, new_item->path_cost_to_end + new_item->future_cost_to_start);
+          if (new_item->me->prev == NULL) num_final_in_Q++;
+        }
       }
+      // the other possible predecessors are prevs of my "friends"
+      if (h->recomb_friends != NULL) {
+        for (hypothesis *fr : *(h->recomb_friends)) {
+          assert(fr->recombined);
+          assert(fr->prev != NULL);
+          assert(! fr->prev->recombined );
+          if (! fr->prev->pruned) {
+            astar_item *new_item = new astar_item();
+            new_item->me = fr->prev;
+            new_item->path_cost_to_end = item->path_cost_to_end + fr->cost - h->prev->cost;
+            new_item->future_cost_to_start = fr->prev->cost;
+            new_item->parent = item;
+            if ((num_final_in_Q < info->num_kbest_predictions) || (new_item->path_cost_to_end + new_item->future_cost_to_start < highest_cost_in_Q)) {
+              Q.push(new_item);
+              highest_cost_in_Q = MAX(highest_cost_in_Q, new_item->path_cost_to_end + new_item->future_cost_to_start);
+              if (new_item->me->prev == NULL) num_final_in_Q++;
+            }
+          }
+        }
+      }
+    }
   }
 
-  // TODO: return
+  for (astar_item *it : visited) delete it;
+  while (!Q.empty()) {
+    astar_item *item = Q.top(); Q.pop();
+    delete item;
+  }
+
+  return found_items;
 }
-*/
 
 void expand_to_generation(translation_info *info, hypothesis *h, function<void(hypothesis*)> add_operation) {
   stack<hypothesis*> my_stack;
@@ -831,7 +912,8 @@ void set_pruning_threshold(translation_info *info, hyp_stack* stack) {
 size_t bucket_contains_equiv(translation_info*info, vector<hypothesis*> bucket, hypothesis *h) {
   for (size_t pos=0; pos<bucket.size(); ++pos) {
     hypothesis *h2 = bucket[pos];
-    if (h2->skippable) continue;
+    if (h2->pruned) continue;
+    if (h2->recombined) continue;
     if (h->lm_context_hash != h2->lm_context_hash) continue;
     if (h->tm_context_hash != h2->tm_context_hash) continue;
     if (h->cov_vec_hash    != h2->cov_vec_hash   ) continue;
@@ -857,61 +939,6 @@ size_t bucket_contains_equiv(translation_info*info, vector<hypothesis*> bucket, 
   return (size_t)-1;
 }
 
-/*
-void recombine_stack(translation_info *info, hyp_stack* stack) {
-  recombination_data * buckets = info->recomb_buckets;
-  size_t mod = buckets->size();
-
-  for (auto vec = buckets->begin(); vec != buckets->end(); vec++)
-    (*vec).clear();
-
-  for (hypothesis* h : stack->Stack) {
-    if (h->skippable) continue;
-    size_t id = (h->lm_context_hash * 3481183 +
-                 h->tm_context_hash * 8942137 +
-                 h->cov_vec_hash    * 9138921) % mod;
-
-    size_t equiv_pos = bucket_contains_equiv(info, (*buckets)[id], h);
-
-    if (equiv_pos == (size_t)-1) {  // there was NOT an equivalent hyp
-      (*buckets)[id].push_back(h);
-    } else {  // there was at position equiv_pos      
-      if (h->cost < (*buckets)[id][equiv_pos]->cost) {
-        (*buckets)[id][equiv_pos]->skippable = true;
-        (*buckets)[id][equiv_pos] = h;
-      } else {
-        h->skippable = true;
-      }
-      stack->num_marked_skippable++;
-    }
-  }
-}
-
-void add_to_stack(translation_info *info, vector<hypothesis*> &S, hypothesis*h) {
-  if (false) {
-    S.push_back(h);
-    return;
-  }
-  recombination_data *buckets = (info->recomb_buckets);
-  size_t mod = buckets->size();
-
-  if (h->skippable) return;
-  size_t id = (h->lm_context_hash * 3481183 +
-               h->tm_context_hash * 8942137 +
-               h->cov_vec_hash    * 9138921) % mod;
-  
-  size_t equiv_pos = bucket_contains_equiv(info, (*buckets)[id], h);
-  if (equiv_pos == (size_t)-1) {  // there was NOT an equivalent hyp
-    S.push_back(h);
-  } else {  // there was at position equiv_pos      
-    if (h->cost < (*buckets)[id][equiv_pos]->cost) {
-      S.push_back(h);
-    } else {
-      h->skippable = true;
-    }
-  }
-}
-*/
 void initialize_hyp_stack(hyp_stack* stack) {
   stack->lowest_cost  = FLT_MAX;
   stack->highest_cost = FLT_MIN;
@@ -919,11 +946,24 @@ void initialize_hyp_stack(hyp_stack* stack) {
   stack->num_marked_skippable = 0;
 }
 
-void add_to_hyp_stack(translation_info*info, hyp_stack* stack, hypothesis* h) {
-  if (h->skippable)
-    return;
+void add_recomb_friend(hypothesis *better, hypothesis *worse) {
+  assert(better->cost <= worse->cost);
+  if (better->recomb_friends == NULL)
+    better->recomb_friends = new vector<hypothesis*>;
+  better->recomb_friends->push_back(worse);
+  worse->recombined = true;
+}
 
-  {  // try recombining before we try pruning
+void add_to_hyp_stack(translation_info*info, hyp_stack* stack, hypothesis* h) {
+  if ((h->cost > stack->prune_if_gt) ||
+      ((stack->Stack.size() >= info->max_bucket_size + stack->num_marked_skippable) && 
+       (h->cost >= stack->highest_cost)))
+    h->pruned = true;
+
+  if (h->pruned || h->recombined) return;
+
+  bool we_were_worse = false;
+  if (info->recomb_buckets) {  // try recombining before we try pruning
     recombination_data *buckets = info->recomb_buckets;
     size_t mod = buckets->size();
 
@@ -935,10 +975,17 @@ void add_to_hyp_stack(translation_info*info, hyp_stack* stack, hypothesis* h) {
 
     if (equiv_pos != (size_t) -1) {   // we can recombine at equiv_pos
       //cerr<<"+";
-      if (h->cost >= (*buckets)[id][equiv_pos]->cost)
-        h->skippable = true; // we're more expensive, so ignore
-      else {
-        (*buckets)[id][equiv_pos]->skippable = true; // we're cheaper, so set the other one to skippable and add us to the stack
+      if (h->cost >= (*buckets)[id][equiv_pos]->cost) {
+        // we're more expensive, so ignore
+        we_were_worse = true;
+        add_recomb_friend((*buckets)[id][equiv_pos], h);
+      } else {
+        // we're cheaper
+        //(*buckets)[id][equiv_pos]->recomb_friend = h;
+        assert(h->recomb_friends == NULL);
+        h->recomb_friends = (*buckets)[id][equiv_pos]->recomb_friends;
+        (*buckets)[id][equiv_pos]->recomb_friends = NULL;
+        add_recomb_friend(h, (*buckets)[id][equiv_pos]);
         stack->num_marked_skippable++;
       }
     } else {
@@ -947,11 +994,7 @@ void add_to_hyp_stack(translation_info*info, hyp_stack* stack, hypothesis* h) {
     }      
   }
 
-  if (h->skippable) return;
-  if (h->cost > stack->prune_if_gt) return;
-  if ((stack->Stack.size() >= info->max_bucket_size + stack->num_marked_skippable) && 
-      (h->cost >= stack->highest_cost)) 
-    return;
+  if (we_were_worse) return;
 
   stack->Stack.push_back(h);
 
@@ -966,53 +1009,12 @@ void add_to_hyp_stack(translation_info*info, hyp_stack* stack, hypothesis* h) {
 
 }
 
-/*
-void add_to_hyp_stack(translation_info*info, hyp_stack* stack, hypothesis* h, bool try_recombination) {
-  if (h->skippable)
-    return;
-
-  if (h->cost > stack->prune_if_gt)
-    return;
- 
-  // if ((stack->Stack.size() >= info->max_bucket_size) &&
-  //     (h->cost >= stack->highest_cost))
-  //   return;
-
-  if (false && try_recombination) {
-    recombination_data *buckets = info->recomb_buckets;
-    size_t mod = buckets->size();
-
-    size_t id = (h->lm_context_hash * 3481183 +
-                 h->tm_context_hash * 8942137 +
-                 h->cov_vec_hash    * 9138921) % mod;
-  
-    size_t equiv_pos = bucket_contains_equiv(info, (*buckets)[id], h);
-    if (equiv_pos == (size_t)-1) {  // there was NOT an equivalent hyp
-      stack->Stack.push_back(h);
-      if (h->cost < stack->lowest_cost ) stack->lowest_cost  = h->cost;
-      if (h->cost > stack->highest_cost) stack->highest_cost = h->cost;
-    } else {  // there was at position equiv_pos      
-      if (h->cost < (*buckets)[id][equiv_pos]->cost) {
-        stack->Stack.push_back(h);
-        if (h->cost < stack->lowest_cost ) stack->lowest_cost  = h->cost;
-        if (h->cost > stack->highest_cost) stack->highest_cost = h->cost;
-      } else {
-        h->skippable = true;
-      }
-    }
-  } else {
-
-    stack->Stack.push_back(h);
-    if (h->cost < stack->lowest_cost ) stack->lowest_cost  = h->cost;
-    if (h->cost > stack->highest_cost) stack->highest_cost = h->cost;
-  }
-}
-*/
-
 bool sort_hyp_by_cost(hypothesis*a, hypothesis*b) { 
-  if (a->skippable && b->skippable) return true;
-  if (a->skippable) return false; // a is skippable, b not
-  if (b->skippable) return true;  // b is skippable, a not
+  bool a_skippable = a->pruned || (a->recombined);
+  bool b_skippable = b->pruned || (b->recombined);
+  if (a_skippable && b_skippable) return true;
+  if (a_skippable) return false; // a is skippable, b not
+  if (b_skippable) return true;  // b is skippable, a not
   return a->cost < b->cost; 
 }
 
@@ -1030,11 +1032,14 @@ void shrink_hyp_stack(translation_info*info, hyp_stack* stack, bool force_shrink
 
   middle = stack->Stack.begin() + info->max_bucket_size;
   end    = stack->Stack.end();
+  for (auto h=middle; h<end; ++h)
+    (*h)->pruned = true;
+
   stack->Stack.erase(middle, end);
 
   stack->num_marked_skippable = 0;
   for (auto it : stack->Stack)
-    stack->num_marked_skippable += (*it).skippable;
+    stack->num_marked_skippable += ((*it).pruned || (*it).recombined);
 }
 
 pair< vector<hypothesis*>, vector<hypothesis*> > stack_generic_search(translation_info *info, size_t (*get_stack_id)(hypothesis*), size_t num_stacks_reserve=0) {
@@ -1058,7 +1063,7 @@ pair< vector<hypothesis*>, vector<hypothesis*> > stack_generic_search(translatio
     size_t cur_stack = NextStacks.top(); NextStacks.pop();
     if (Stacks[cur_stack] == NULL) continue;
 
-    if (NextStacks.empty())
+    if (NextStacks.empty() && info->recomb_buckets)
       for (auto vec = info->recomb_buckets->begin(); vec != info->recomb_buckets->end(); ++vec)
         (*vec).clear();
 
@@ -1070,8 +1075,9 @@ pair< vector<hypothesis*>, vector<hypothesis*> > stack_generic_search(translatio
     while (it != Stacks[cur_stack]->Stack.end()) {
       num_processed++;
       hypothesis *h = *it;
-      if (h->cost > Stacks[cur_stack]->prune_if_gt) { ++it; continue; }
-      if (h->skippable) { ++it; continue; }
+      if (h->cost > Stacks[cur_stack]->prune_if_gt) { h->pruned = true; }
+      if (h->pruned) { ++it; continue; }
+      if (h->recombined) { ++it; continue; }
 
       size_t diff = it - Stacks[cur_stack]->Stack.begin();
 
@@ -1481,7 +1487,7 @@ bool read_mtu_item_from_file(FILE* fd, mtu_item& mtu) {
   //cerr<<"ident="<<mtu.ident<<", nr="<<nr<<endl;
   if ((nr == 0) || (feof(fd))) return true;
 
-  nr = fscanf(fd, "%d %d\t", &mtu.tr_doc_freq, &mtu.tr_freq);
+  nr = fscanf(fd, "%zd %zd\t", &mtu.tr_doc_freq, &mtu.tr_freq);
   assert(nr == 2);
 
   mtu.gap_option = 0;
@@ -1603,21 +1609,25 @@ aligned_sentence_pair read_next_aligned_sentence(translation_info*info, FILE *fd
 
   is_new_document = false;
 
+ NEXT_LINE:
+
   nr = fscanf(fd, "%d", &cnt);
   assert(nr == 1);
 
   if (cnt == 0) {
     // this is a marker for a new document (just a single line containing "0")
     is_new_document = true;
-    nr = fscanf(fd, "%d", &cnt);
-    assert(nr == 1);
+    goto NEXT_LINE;
   }
-  assert(cnt <= MAX_SENTENCE_LENGTH);
+
+  bool skip_me = false;
+
+  if (cnt > MAX_SENTENCE_LENGTH) skip_me = true;
   vector<lexeme> F(cnt);
   for (posn i=0; i<cnt; ++i) nr = fscanf(fd, " %d", &F[i]);
 
   nr = fscanf(fd, "\t%d", &cnt);
-  assert(cnt <= MAX_SENTENCE_LENGTH);
+  if (cnt > MAX_SENTENCE_LENGTH) skip_me = true;
   vector<lexeme> e(cnt);
   for (posn i=0; i<cnt; ++i) nr = fscanf(fd, " %d", &e[i]);
 
@@ -1630,6 +1640,9 @@ aligned_sentence_pair read_next_aligned_sentence(translation_info*info, FILE *fd
     al[x].insert(w);
   }
   nr = fscanf(fd, "\n");
+
+  if (skip_me)
+    goto NEXT_LINE;
 
   compute_bleu_stats(e, &info->bleu_total_stats);
   for (posn i=0; i<4; ++i)
@@ -1707,37 +1720,42 @@ void test_decode() {
   info.sent[4] = (uint32_t)'B';
   info.sent[5] = (uint32_t)'C';
   build_sentence_mtus(&info, dict);
-  info.compute_cost = simple_compute_cost;
+  info.compute_cost = simple_compute_cost;  // TODO: this doesn't actually do anything!
   info.language_model = NULL; // new lm::ngram::Model((char*)"file.arpa-bin");
   info.max_gaps = 5;
-  info.max_gap_width = 1;
+  info.max_gap_width = 5;
   info.max_phrase_len = 5;
+  info.num_kbest_predictions = 100;
 
   info.operation_allowed = (1 << OP_MAXIMUM) - 1;  // all operations
-    // (1 << OP_INIT  ) |
-    // (1 << OP_GEN_ST) |
-    // (1 << OP_CONT_WORD) |
-    // (1 << OP_CONT_GAP) |
-    // (1 << OP_GEN_S ) |
-    // (1 << OP_GEN_T ) |
-    // (1 << OP_GAP   ) |
-    // (1 << OP_JUMP_B) |
-    // (1 << OP_JUMP_E) |
-    // 0;
 
   info.pruning_coefficient = 0.;
-  info.recomb_buckets = new recombination_data(NUM_RECOMB_BUCKETS);
+  //delete info.recomb_buckets; info.recomb_buckets = NULL;
 
   for (size_t rep = 0; rep < 1 + 0*999; ++rep) {
-    cerr<<".";
+    //cerr<<".";
     info.hyp_ring = initialize_ring<hypothesis>(INIT_HYPOTHESIS_RING_SIZE);
 
     pair< vector<hypothesis*>, vector<hypothesis*> > GoalsVisited = 
       stack_generic_search(&info, 
-                           [](hypothesis* hyp) { return (size_t)hyp->cov_vec_count; },
+                           [](hypothesis* hyp) { 
+                             return (size_t)hyp->cov_vec_count * 2 + ((hyp->n != hyp->Z) || (!is_covered(hyp, hyp->n)));
+                             //return (size_t)hyp->cov_vec_count; 
+                           },
                            info.N*2);
 
 
+    vector< pair< float,vector<lexeme> > > results = astar_kbest_search(&info, GoalsVisited.first);
+    for (auto pair : results) {
+      cout << pair.first << "\t[";
+      for (lexeme w : pair.second) {
+        cout << w << " ";
+        //cout << OP_CHAR[(short)op.op] << op.arg1 << " ";
+      }
+      cout << "]"<<endl;
+    }
+
+    /*
     for (auto &hyp : GoalsVisited.first) {
       vector<lexeme> trans = get_translation(&info, hyp);
 
@@ -1746,12 +1764,15 @@ void test_decode() {
         cout<<" "<<w;
       cout<<endl;
     }
+    */
 
     free_ring(info.hyp_ring, free_one_hypothesis);
+    free_ring(info.lm_state_ring);
+    free_ring(info.tm_state_ring);
   }
   cerr<<endl;
   if (info.language_model != NULL) delete info.language_model;
-  delete info.recomb_buckets;
+  if (info.recomb_buckets) delete info.recomb_buckets;
   free_sentence_mtus(info.mtus_at);
   free_dict(dict);
 }
@@ -1963,12 +1984,20 @@ void predict_lm(translation_info *info, int argc, char*argv[]) {
     if (GoalsVisited.first.size() == 0)
       cout<<"FAIL"<<endl;
     else {
+      if (info->num_kbest_predictions > 1) {
+        vector< pair< float,vector<lexeme> > > results = astar_kbest_search(info, GoalsVisited.first);
+        for (auto pair : results) {
+          cout << pair.first << "\t[";
+          for (lexeme w : pair.second)
+            cout << w << " ";
+          cout << "]"<<endl;
+        }
+      }
       size_t best_hyp_id = 0;
       for (size_t id=0; id<GoalsVisited.first.size(); ++id) {
         if (GoalsVisited.first[id]->cost < GoalsVisited.first[best_hyp_id]->cost)
           best_hyp_id = id;
       }
-
       hypothesis*hyp = GoalsVisited.first[best_hyp_id];
       vector<lexeme> trans = get_translation(info, hyp);
       update_bleu_stats(info, trans);
@@ -1976,9 +2005,6 @@ void predict_lm(translation_info *info, int argc, char*argv[]) {
       for (auto &w : get_translation(info, hyp))
         cout<<" "<<w;
       cout<<endl;
-
-      //for (hypothesis* par=hyp; par!=NULL; par=par->prev) { cerr <<"     from: "; print_hypothesis(info, par); } cerr<<endl;
-
     }
     
     free_sentence_mtus(info->mtus_at);
@@ -2052,6 +2078,7 @@ namespace StolenFromKenLM {
   
 
 int main(int argc, char*argv[]) {
+  //  test_decode();  return 0;
   if (argc < 2) usage();
 
   timespec started_timespec;

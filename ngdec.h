@@ -108,11 +108,16 @@ struct hypothesis {
   lm::ngram::State * tm_context;
   uint32_t tm_context_hash;
 
-  bool skippable; // recombination says we can be skipped!
+  //bool skippable; // recombination says we can be skipped!
+  bool pruned;   // we've been pruned for post (recomb_friend!=NULL tells us that we've been recombined)
 
   float   cost;
+  float   cost_future;
   hypothesis * prev;
-  vector<hypothesis*> next;
+  //vector<hypothesis*> *next;
+  //hypothesis * recomb_friend;
+  vector<hypothesis*> * recomb_friends;  // if we're the BEST, then recomb_friends is everything that's equivalent to us but worse
+  bool recombined;  // if we're not the BEST then we've been recombined
 };
   
 
@@ -174,13 +179,17 @@ struct translation_info {
   uint32_t operation_allowed;
   float    pruning_coefficient;
   size_t   max_bucket_size;
-  float    gen_s_cost;
-  float    gap_cost;
   size_t   max_gaps;
   size_t   max_gap_width;
   size_t   max_phrase_len;  // must be <= MAX_PHRASE_LEN
   size_t   num_kbest_predictions;
   size_t   max_mtus_per_token;
+
+  float    gen_s_cost;
+  float    gap_cost;
+  float    tm_cost;
+  float    lm_cost;
+  float    brevity_cost;
 
   // status
   size_t total_sentence_count;
@@ -190,6 +199,8 @@ struct translation_info {
 
 struct astar_item {
   hypothesis * me;
+  float path_cost_to_end;
+  float future_cost_to_start;
   astar_item * parent;
 };
 
