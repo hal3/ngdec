@@ -11,6 +11,7 @@
 #include "ngdec.h"
 #include "string.h"
 #include "lm/model.hh"
+//#include "mathic_heap.h"
 
 namespace ng=lm::ngram;
 
@@ -125,6 +126,8 @@ int initialize_translation_info(int argc, char*argv[], translation_info&info) {
   info.tm_state_ring = NULL;
   info.lm_state_ring = NULL;
 
+  //info.vocab_dictionary = NULL;
+
   memset(info.bleu_intersection, 0, 4*sizeof(size_t));
   memset(info.bleu_ref_counts, 0, 4*sizeof(size_t));
   info.bleu_total_hyp_len = 0;
@@ -139,6 +142,7 @@ int initialize_translation_info(int argc, char*argv[], translation_info&info) {
   info.max_phrase_len = 5;
   info.num_kbest_predictions = 1;
   info.max_mtus_per_token = 8;
+  info.allow_copy = true;
 
   info.gen_s_cost = 10;
   info.gap_cost = 10;
@@ -158,6 +162,8 @@ int initialize_translation_info(int argc, char*argv[], translation_info&info) {
     else if (strcmp(argv[i], "--no-gen_s")    == 0) turn_off_bit(info.operation_allowed, OP_GEN_S);
     else if (strcmp(argv[i], "--no-gen_t")    == 0) turn_off_bit(info.operation_allowed, OP_GEN_T);
     else if (strcmp(argv[i], "--no-gap")      == 0) turn_off_bit(info.operation_allowed, OP_GAP);
+    else if (strcmp(argv[i], "--no_copy")     == 0) info.allow_copy = false;
+    //else if (strcmp(argv[i], "--strings")     == 0) info.vocab_dictionary = new VocabDictionary;
     else if (strcmp(argv[i], "--prune")       == 0) info.pruning_coefficient = atof(ensure_argument(argc, argv, i));
     else if (strcmp(argv[i], "--bucket_size") == 0) info.max_bucket_size     = atoi(ensure_argument(argc, argv, i));
     else if (strcmp(argv[i], "--max_gaps")    == 0) info.max_gaps            = atoi(ensure_argument(argc, argv, i));
@@ -268,8 +274,8 @@ posn get_translation_length(hypothesis *h) {
       else  // GEN_ST
         len += h->cur_mtu->mtu->tgt_len;
     }
-    else if (h->last_op == OP_GEN_T) // || h->last_op == OP_COPY)
-      len += 1;
+    else if (h->last_op == OP_GEN_T)
+      ++len;
     h = h->prev;
   }
 
@@ -284,7 +290,7 @@ vector<lexeme> get_translation(translation_info *info, hypothesis *h) {
   while (h != NULL) {
     if (h->last_op == OP_GEN_ST) {
       if (h->cur_mtu->mtu->tgt_len == 0) { // COPY
-        trans[m] = info->sent[h->n];
+        trans[m] = MAX_VOCAB_SIZE + info->sent[h->n];
         m--;
       } else { // GEN_ST
         for (posn i=0; i<h->cur_mtu->mtu->tgt_len; ++i) {
@@ -295,10 +301,7 @@ vector<lexeme> get_translation(translation_info *info, hypothesis *h) {
     } else if (h->last_op == OP_GEN_T) {
       trans[m] = h->cur_mtu->mtu->tgt[0];
       m--;
-    } /* else if (h->last_op == OP_COPY) {
-      trans[m] = info->sent[h->n];
-      m--;
-      } */
+    }
 
     h = h->prev;
   }
@@ -451,8 +454,11 @@ hypothesis* get_next_hypothesis(translation_info*info, hypothesis *h) {
 
 void free_sentence_mtus(vector< vector<mtu_for_sent*> > sent_mtus) {
   for (auto &it1 : sent_mtus)
-    for (auto &it2 : it1)
+    for (mtu_for_sent* &it2 : it1) {
+      if (it2->mtu->tgt_len == 0)
+        free(it2->mtu);
       free(it2);
+    }
 }
 
 void build_sentence_mtus(translation_info *info, mtu_item_dict dict) {
@@ -461,48 +467,71 @@ void build_sentence_mtus(translation_info *info, mtu_item_dict dict) {
 
   for (posn n=0; n<N; ++n) {
     auto dict_entry = dict.find(info->sent[n]);
-    if (dict_entry == dict.end()) continue;
 
-    vector<mtu_item*> mtus = dict_entry->second;
-    float last_mtu_tf = FLT_MAX;
-    for (mtu_item* mtu_iter : mtus) {
+    if (dict_entry != dict.end()) {
+      vector<mtu_item*> mtus = dict_entry->second;
+      float last_mtu_tf = FLT_MAX;
+      for (mtu_item* mtu_iter : mtus) {
+        mtu_for_sent* mtu = (mtu_for_sent*)calloc(1, sizeof(mtu_for_sent));
+        mtu->mtu = mtu_iter;
+
+        assert( mtu_iter->tr_freq <= last_mtu_tf );
+        last_mtu_tf = mtu_iter->tr_freq;
+
+        for (posn m=0; m<info->max_phrase_len; ++m)
+          for (posn i=0; i<NUM_MTU_OPTS; ++i)
+            mtu->found_at[m][i] = MAX_SENTENCE_LENGTH+1;
+
+        mtu->found_at[0][0] = n;
+        posn last_position = n;
+        bool success = true;
+        for (posn i=1; i<mtu->mtu->src_len; ++i) {
+          posn num_found = 0;
+          for (posn n2=last_position; n2<N; ++n2) {
+            if (info->sent[n2] == mtu->mtu->src[i]) {
+              mtu->found_at[i][num_found] = n2;
+              ++num_found;
+              if (num_found > NUM_MTU_OPTS)
+                break;
+            }
+          }
+          if (num_found == 0) {
+            success = false;
+            break;
+          }
+          last_position = mtu->found_at[i][0];
+        }
+
+        if (success) {
+          mtus_at[n].push_back(mtu);
+          if (mtus_at[n].size() >= info->max_mtus_per_token)
+            break;
+        } else {
+          free(mtu);
+        }
+      }
+    }
+    // cerr << info->allow_copy << " " << mtus_at[n].size();
+    // if (mtus_at[n].size() > 0)
+    //   cerr << " " << mtus_at[n][0]->mtu->tr_freq;
+    // cerr << endl;
+    if ((info->allow_copy) && 
+        ( (mtus_at[n].size() == 0) || 
+          ( (mtus_at[n].size() == 1) && 
+            (mtus_at[n][0]->mtu->tr_freq <= 2) ))
+        ) {
       mtu_for_sent* mtu = (mtu_for_sent*)calloc(1, sizeof(mtu_for_sent));
-      mtu->mtu = mtu_iter;
 
-      assert( mtu_iter->tr_freq <= last_mtu_tf );
-      last_mtu_tf = mtu_iter->tr_freq;
+      mtu->mtu = (mtu_item*)calloc(1, sizeof(mtu_item));
+      memset(mtu->mtu, 0, sizeof(mtu));
+      mtu->mtu->src[0] = info->sent[n];
 
       for (posn m=0; m<info->max_phrase_len; ++m)
         for (posn i=0; i<NUM_MTU_OPTS; ++i)
           mtu->found_at[m][i] = MAX_SENTENCE_LENGTH+1;
-
       mtu->found_at[0][0] = n;
-      posn last_position = n;
-      bool success = true;
-      for (posn i=1; i<mtu->mtu->src_len; ++i) {
-        posn num_found = 0;
-        for (posn n2=last_position; n2<N; ++n2) {
-          if (info->sent[n2] == mtu->mtu->src[i]) {
-            mtu->found_at[i][num_found] = n2;
-            ++num_found;
-            if (num_found > NUM_MTU_OPTS)
-              break;
-          }
-        }
-        if (num_found == 0) {
-          success = false;
-          break;
-        }
-        last_position = mtu->found_at[i][0];
-      }
-
-      if (success) {
-        mtus_at[n].push_back(mtu);
-        if (mtus_at[n].size() >= info->max_mtus_per_token)
-          break;
-      } else {
-        free(mtu);
-      }
+      
+      mtus_at[n].push_back(mtu);
     }
   }
 
@@ -679,7 +708,8 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
     }
   }
 
-  if ( ((info->operation_allowed & (1 << OP_GEN_ST)) > 0) && queue_empty && (n < N)) { // try generating a new cept
+  bool allow_gen_st = (info->operation_allowed & (1 << OP_GEN_ST)) > 0;
+  if ( (allow_gen_st || info->allow_copy) && queue_empty && (n < N)) { // try generating a new cept
     posn top = (last_op_was_gap) ? (N) : (n+1);
     assert(top <= N);
     for (posn m = n; m < top; ++m) {
@@ -687,6 +717,9 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
       if (is_covered(h, m)) continue;
       vector<mtu_for_sent*> mtus = info->mtus_at[m];
       for (auto &mtu : mtus) {
+        if ( (mtu->mtu->tgt_len == 0) && !info->allow_copy ) continue;
+        if ( (mtu->mtu->tgt_len >  0) && !allow_gen_st     ) continue;
+
         //cout << "trying @m="<<m<<" lex="<<info->sent[m]<<": "; print_mtu(*mtu->mtu);cout<<endl;
         hypothesis *h2 = get_next_hypothesis(info, h);
         h2->last_op = OP_GEN_ST;
@@ -778,7 +811,6 @@ bool is_final_hypothesis(translation_info *info, hypothesis *h) {
   return true;
 }
 
-
 class astar_hypothesis_lt {
 public:
   bool operator()(astar_item* a, astar_item* b) { // true if a<b
@@ -786,8 +818,23 @@ public:
            (b->path_cost_to_end + b->future_cost_to_start);
   }
 };
-
 typedef priority_queue<astar_item*,vector<astar_item*>,astar_hypothesis_lt> astar_pqueue;
+
+// class astar_hypothesis_config {
+// public:
+//   typedef astar_item* Entry;
+//   typedef float CompareResult;
+//   inline const CompareResult compare(Entry a, Entry b) {
+//     return (a->path_cost_to_end + a->future_cost_to_start) -
+//            (b->path_cost_to_end + b->future_cost_to_start);
+//   }
+//   inline const bool cmpLessThan(CompareResult r) { return r  > 0; }
+//   inline const bool cmpEqual(CompareResult r)    { return r == 0; }
+//   static const bool supportDeduplication = false;
+//   static const bool fastIndex = true;
+//   static const Entry deduplicate(Entry a, Entry value) { return a; }
+// };
+// typedef mathic::Heap<astar_hypothesis_config> astar_pqueue;
 
 vector<lexeme> get_astar_translation(translation_info*info, astar_item *item) {
   vector<lexeme> ret;
@@ -795,7 +842,7 @@ vector<lexeme> get_astar_translation(translation_info*info, astar_item *item) {
     hypothesis*h = item->me;
     if (h->last_op == OP_GEN_ST)
       if (h->cur_mtu->mtu->tgt_len == 0) // COPY
-        ret.push_back( info->sent[h->n] );  // TODO: this is kind of broken :(
+        ret.push_back( MAX_VOCAB_SIZE + info->sent[h->n] );
       else
         for (posn i=0; i<h->cur_mtu->mtu->tgt_len; ++i)
           ret.push_back(h->cur_mtu->mtu->tgt[i]);
@@ -810,10 +857,12 @@ vector< pair< float,vector<lexeme> > > astar_kbest_search(translation_info*info,
   astar_pqueue Q;
   size_t num_final_in_Q = 0;
   float highest_cost_in_Q = FLT_MIN;
-  unordered_set<astar_item*> visited;
+
+  ring<astar_item> *astar_ring = initialize_ring<astar_item>(10001);
 
   for (hypothesis *h_end : Goals) {
-    astar_item *item = new astar_item();
+    //astar_item *item = new astar_item();
+    astar_item *item = get_next_ring_element(astar_ring);
     item->me = h_end;
     item->path_cost_to_end = 0;
     item->future_cost_to_start = h_end->cost;
@@ -827,9 +876,7 @@ vector< pair< float,vector<lexeme> > > astar_kbest_search(translation_info*info,
     astar_item *item = Q.top(); Q.pop();
     hypothesis *h = item->me;
     assert( h != NULL );
-    if (h->pruned) { delete item; continue; }
-    if (unordered_contains(&visited, item)) continue;
-    visited.insert(item);
+    if (h->pruned) continue;
 
     if (h->prev == NULL) {  // this is an initial item
       found_items.push_back( { item->path_cost_to_end, 
@@ -839,7 +886,8 @@ vector< pair< float,vector<lexeme> > > astar_kbest_search(translation_info*info,
     } else {  // this is not a final item
       // the first predecessor is "prev"
       if (! h->prev->pruned) {
-        astar_item *new_item = new astar_item();
+        astar_item *new_item = get_next_ring_element(astar_ring);
+        //astar_item *new_item = new astar_item();
         new_item->me = h->prev;
         new_item->path_cost_to_end = item->path_cost_to_end + h->cost - h->prev->cost;
         new_item->future_cost_to_start = h->prev->cost;
@@ -857,7 +905,8 @@ vector< pair< float,vector<lexeme> > > astar_kbest_search(translation_info*info,
           assert(fr->prev != NULL);
           assert(! fr->prev->recombined );
           if (! fr->prev->pruned) {
-            astar_item *new_item = new astar_item();
+            astar_item *new_item = get_next_ring_element(astar_ring);
+            //astar_item *new_item = new astar_item();
             new_item->me = fr->prev;
             new_item->path_cost_to_end = item->path_cost_to_end + fr->cost - h->prev->cost;
             new_item->future_cost_to_start = fr->prev->cost;
@@ -873,11 +922,7 @@ vector< pair< float,vector<lexeme> > > astar_kbest_search(translation_info*info,
     }
   }
 
-  for (astar_item *it : visited) delete it;
-  while (!Q.empty()) {
-    astar_item *item = Q.top(); Q.pop();
-    delete item;
-  }
+  free_ring<astar_item>(astar_ring);
 
   return found_items;
 }
@@ -1601,15 +1646,15 @@ void collect_mtus(size_t max_phrase_len, bool max_discontig, aligned_sentence_pa
   }
 }
 
-aligned_sentence_pair read_next_aligned_sentence(translation_info*info, FILE *fd, bool &is_new_document) {
-  assert(! feof(fd));
-
+bool read_next_aligned_sentence(translation_info*info, FILE *fd, aligned_sentence_pair &ret, bool &is_new_document) {
   lexeme cnt, w,x;
   size_t nr;
 
   is_new_document = false;
 
  NEXT_LINE:
+
+  if (feof(fd)) return false;
 
   nr = fscanf(fd, "%d", &cnt);
   assert(nr == 1);
@@ -1684,7 +1729,8 @@ aligned_sentence_pair read_next_aligned_sentence(translation_info*info, FILE *fd
     info->next_sentence_print *= 2; 
   }
 
-  return { F, E, A };
+  ret.F = F; ret.E = E; ret.A = A;
+  return true;
 }
 
 
@@ -1773,6 +1819,7 @@ void test_decode() {
   cerr<<endl;
   if (info.language_model != NULL) delete info.language_model;
   if (info.recomb_buckets) delete info.recomb_buckets;
+  //if (info.vocab_dictionary) delete info.vocab_dictionary;
   free_sentence_mtus(info.mtus_at);
   free_dict(dict);
 }
@@ -1826,7 +1873,8 @@ void extract(translation_info *info, int argc, char*argv[]) {
   size_t skipped_for_len = 0, skipped_for_discontig = 0;
   while (!feof(fd)) {
     bool is_new_document = false;
-    aligned_sentence_pair spair = read_next_aligned_sentence(info, fd, is_new_document);
+    aligned_sentence_pair spair;
+    if (!read_next_aligned_sentence(info, fd, spair, is_new_document)) break;
     if (is_new_document) {
       add_all_mtus(all_mtus, cur_doc_mtus);
       cur_doc_mtus.clear();
@@ -1859,7 +1907,8 @@ void oracle(translation_info*info, int argc, char*argv[]) {
 
   while (!feof(fd)) {
     bool is_new_document = false;
-    aligned_sentence_pair spair = read_next_aligned_sentence(info, fd, is_new_document);
+    aligned_sentence_pair spair;
+    if (!read_next_aligned_sentence(info, fd, spair, is_new_document)) break;
     if (is_new_document) cout << endl;
     vector<operation> op_seq;
 
@@ -1887,7 +1936,8 @@ void predict_forced(translation_info *info, int argc, char*argv[]) {
 
   while (!feof(fd)) {
     bool is_new_document = false;
-    aligned_sentence_pair spair = read_next_aligned_sentence(info, fd, is_new_document);
+    aligned_sentence_pair spair;
+    if (!read_next_aligned_sentence(info, fd, spair, is_new_document)) break;
     //cout << '|' << bleu_ref_counts[0] << '|' << bleu_ref_counts[1] << '|' << bleu_ref_counts[2] << '|' << bleu_ref_counts[3] << "\t";
 
     if (is_new_document) cout << endl;
@@ -1926,7 +1976,8 @@ void predict_forced(translation_info *info, int argc, char*argv[]) {
   compute_overall_bleu(info, true);
 
   if (info->language_model != NULL) delete info->language_model;
-  delete info->recomb_buckets;
+  if (info->recomb_buckets) delete info->recomb_buckets;
+  //if (info->vocab_dictionary) delete info->vocab_dictionary;
   free_dict(dict);
 }
 
@@ -1943,14 +1994,18 @@ size_t bitset_hash(bitset<N> bs) {
   */
 }
 
-
 void predict_lm(translation_info *info, int argc, char*argv[]) {
   if ((argc != 4) || (!strcmp(argv[0], "-h")) || (!strcmp(argv[0], "-help")) || (!strcmp(argv[0], "--help"))) {
     cout << "usage: ngdec predict-lm [en lm file] [opseq lm file] [mtu file] [ngdec file] > [predictions]" << endl;
     exit(-1);
   }
 
-  info->language_model = new lm::ngram::Model(argv[0]);
+  // lm::ngram::Config cfg;
+  // if (info->vocab_dictionary) {
+  //   cfg.enumerate_vocab = info->vocab_dictionary;
+  //   cfg.load_method = util::LAZY;
+  // }
+  info->language_model = new lm::ngram::Model(argv[0]); // , cfg);
   info->opseq_model    = new lm::ngram::Model(argv[1]);
 
   FILE *fd = fopen(argv[2], "r");
@@ -1963,7 +2018,8 @@ void predict_lm(translation_info *info, int argc, char*argv[]) {
 
   while (!feof(fd)) {
     bool is_new_document = false;
-    aligned_sentence_pair spair = read_next_aligned_sentence(info, fd, is_new_document);
+    aligned_sentence_pair spair;
+    if (!read_next_aligned_sentence(info, fd, spair, is_new_document)) break;
     if (is_new_document) cout << endl;
 
     info->N = spair.F.size();
@@ -2005,6 +2061,9 @@ void predict_lm(translation_info *info, int argc, char*argv[]) {
       for (auto &w : get_translation(info, hyp))
         cout<<" "<<w;
       cout<<endl;
+      // for (auto &w : get_translation(info, hyp))
+      //   cout<<" "<<info->vocab_dictionary->Get(w);
+      // cout<<endl;
     }
     
     free_sentence_mtus(info->mtus_at);
@@ -2018,7 +2077,8 @@ void predict_lm(translation_info *info, int argc, char*argv[]) {
 
   if (info->language_model != NULL) delete info->language_model;
   if (info->opseq_model != NULL) delete info->opseq_model;
-  delete info->recomb_buckets;
+  if (info->recomb_buckets) delete info->recomb_buckets;
+  //if (info->vocab_dictionary) delete info->vocab_dictionary;
   free_dict(dict);
 }
 

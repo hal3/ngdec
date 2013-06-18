@@ -154,6 +154,32 @@ template<class T> struct ring {
 
 typedef ring<hypothesis> hypothesis_ring;
 
+/*
+class VocabDictionary : public lm::EnumerateVocab {
+public:
+  void Add(lexeme index, const StringPiece &str) {
+    strings.reserve(index+1);
+    for (; max_idx < index; max_idx++)
+      strings.push_back("*unk*");
+    if ((index == 0) && (max_idx == 0))
+      strings.push_back(str.as_string());
+    else if (index == max_idx+1)
+      strings.push_back(str.as_string());
+    else
+      strings[index] = str.as_string();
+  }
+  const string Get(lexeme index) {
+    if (index > max_idx)
+      return "*unk*";
+    else
+      return strings[index];
+  }
+
+private:
+  vector<string> strings;
+  lexeme max_idx;
+};
+*/
 struct translation_info {
   lexeme sent[MAX_SENTENCE_LENGTH];
   posn N;
@@ -170,6 +196,8 @@ struct translation_info {
   vector< vector<mtu_for_sent*> > mtus_at;
   float (*compute_cost)(void*,hypothesis*);
 
+  //VocabDictionary * vocab_dictionary;
+
   size_t bleu_intersection[4];
   size_t bleu_ref_counts[4];
   size_t bleu_total_hyp_len;
@@ -184,6 +212,7 @@ struct translation_info {
   size_t   max_phrase_len;  // must be <= MAX_PHRASE_LEN
   size_t   num_kbest_predictions;
   size_t   max_mtus_per_token;
+  bool     allow_copy;
 
   float    gen_s_cost;
   float    gap_cost;
