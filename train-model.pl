@@ -1,5 +1,6 @@
 #!/usr/bin/perl -w
 use strict;
+use ngdec;
 
 my $USE_LM = '';
 my $USE_LM_BIN = '';
@@ -12,22 +13,21 @@ my $USAGE = '' .
     "  --use_lm [file]          instead of building a language model from\n" .
     "                           [par-tgt], use the specified language model,\n" .
     "                           which must be in ARPA format\n" .
-    "\n" .
     "  --use_lm_bin [file]      use this file as a binary LM (requires --use_lm)\n" .
-    "\n" .
     "  --lm_order [N]           set LM order to N (def: $LM_ORDER)\n" .
-    "\n" .
     "  --tm_order [N]           set TM order to N (def: $TM_ORDER)\n" .
+    "  --savev file             save the local vocab to this file\n" .
     '';
 
 my $SRC;
-
+my $SAVEV = '';
 while (1) {
     my $tmp = shift or last;
     if    ($tmp eq '--use_lm'  ) { $USE_LM   = shift or die "$tmp requires an argument!"; }
     elsif ($tmp eq '--use_lm_bin'){$USE_LM_BIN=shift or die "$tmp requires an argument!"; }
     elsif ($tmp eq '--lm_order') { $LM_ORDER = shift or die "$tmp requires an argument!"; }
     elsif ($tmp eq '--tm_order') { $TM_ORDER = shift or die "$tmp requires an argument!"; }
+    elsif ($tmp eq '--savev')    { $SAVEV    = shift or die "$tmp requires an argument!"; }
     elsif ($tmp =~ /^-/) { die "unknown option: '$tmp'"; }
     else { $SRC = $tmp; last; }
 }
@@ -46,6 +46,7 @@ foreach my $file (@requiredFiles) {
 }
 if (! -d $OUT) { die "directory does not exist '$OUT'"; }
 
+
 my $LMPLZ = `which lmplz`;        chomp $LMPLZ; if ($LMPLZ eq '') { die "error: cannot find lmplz"; }
 my $B_BIN = `which build_binary`; chomp $B_BIN; if ($B_BIN eq '') { die "error: cannot find build_binary"; }
 
@@ -57,12 +58,21 @@ my $LM_TGT_BIN  = build_binary_lm('tgt', $LM_TGT_ARPA, $USE_LM_BIN);
 my $LM_SRC_ARPA = build_arpa_lm('src', $SRC, 2, '');
 my $LM_SRC_BIN  = build_binary_lm('src', $LM_SRC_ARPA, '');
 
-my $TGT_ID = map_to_ids('tgt', $TGT, $LM_TGT_ARPA);
-my $SRC_ID = map_to_ids('src', $SRC, $LM_SRC_ARPA);
-
 my $ALN_PE = postedit_alignments();
 
+#my $TGT_ID = map_to_ids('tgt', $TGT, $LM_TGT_ARPA);
+#my $SRC_ID = map_to_ids('src', $SRC, $LM_SRC_ARPA);
+
+my $vocabFile;
+if ($SAVEV ne '') {
+    local *VOC;
+    open VOC, "> $SAVEV" or die "cannot open $SAVEV for writing";
+    $vocabFile = *VOC{IO};
+}
+
 my $NGDEC  = combine_all();
+
+if (defined $vocabFile) { close $vocabFile; }
 
 my $MTUS0 = run("$OUT/mtus", "./ngdec extract $NGDEC > {}");
 my $MTUS  = run("$OUT/mtus-pruned", "./prune_mtu_dict.pl < $MTUS0 > {}");
@@ -119,25 +129,53 @@ sub build_binary_lm {
     }
 }
 
-sub map_to_ids {
-    my ($fnameStr, $inFile, $lmName) = @_;
-    my $inFileCmd = ($inFile =~ /\.gz$/) ? "zcat $inFile" : "cat $inFile";
-    return run("$OUT/$fnameStr.id", "$inFileCmd | ./word_to_id.pl $lmName > {}");
-}
-
 sub postedit_alignments {
     return run("$OUT/aln", "./postedit_alignments.pl $TGT $ALN {}");
 }
 
 sub combine_all {
-    return run("$OUT/train", "./combine_all.pl $SRC_ID $TGT_ID $ALN_PE > {}");
-}
+    if ((-e "$OUT/train") && (not $AnythingChanged)) {
+        print STDERR "skipping: $OUT/train // combine_all\n";
+        return "$OUT/train";
+    }
+    $AnythingChanged = 1;
 
+    print STDERR "running: combine_all > $OUT/train\n";
 
-sub mkfilename {
-    my ($fn) = @_;
-    if ($fn =~ /\.gz$/) { return "zcat $fn |"; }
-    else { return $fn; }
+    my %srcV = read_lm_vocab($LM_SRC_ARPA);
+    my %tgtV = read_lm_vocab($LM_TGT_ARPA);
+
+    open O, "> $OUT/train" or die;
+
+    open F, mkfilename($SRC) or die;
+    open E, mkfilename($TGT) or die;
+    open A, mkfilename($ALN_PE) or die;
+
+    while (1) {
+        my %localV = ();
+
+        $_ = <F>; if (not defined $_) { last; }
+        print O stringToIDs(\%srcV, \%localV, $_, 1, $vocabFile);
+
+        $_ = <E>; if (not defined $_) { die "too few lines in $TGT"; }
+        print O "\t" . stringToIDs(\%tgtV, \%localV, $_, 0, $vocabFile);
+
+        $_ = <A>; if (not defined $_) { die "too few lines in $ALN_PE"; }
+        s/\s+/ /g; s/^ //; s/ $//;
+        my @t = split;
+        print O "\t" . (scalar @t) . ' ' . $_ . "\n";
+    }
+
+    while (<E>) { die "too many lines in $TGT"; }
+    while (<A>) { die "too many lines in $ALN_PE"; }
+
+    close A;
+    close E;
+    close F;
+
+    close O;
+
+    return "$OUT/train";
 }
 
 sub run {
