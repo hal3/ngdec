@@ -14,10 +14,10 @@ using namespace std;
 #define INIT_HYPOTHESIS_RING_SIZE 1024
 
 #define MAX_SENTENCE_LENGTH   100
-#define NUM_MTU_OPTS           10
+#define NUM_MTU_OPTS           100
 #define MAX_VOCAB_SIZE   10000000
 #define MAX_PHRASE_LEN         10
-#define NUM_RECOMB_BUCKETS   1023
+#define NUM_RECOMB_BUCKETS   10231
 #define MAX_GAPS_TOTAL         32
 
 #define OP_UNKNOWN   0
@@ -32,8 +32,18 @@ using namespace std;
 #define OP_JUMP_E    9
 #define OP_MAXIMUM   10
 
+#define W_LM     0
+#define W_TM     1
+#define W_GEN_S  2
+#define W_GAP    3
+#define W_BREV   4
+#define W_COPY   5
+#define W_MAX_ID 6
+
 string OP_NAMES[OP_MAXIMUM] = { "OP_UNKNOWN", "OP_INIT", "OP_GEN_ST", "OP_CONT_WORD", "OP_CONT_GAP", "OP_GEN_S", "OP_GEN_T", "OP_GAP", "OP_JUMP_B", "OP_JUMP_E" };
 char   OP_CHAR[OP_MAXIMUM+1]  = "?0GwgST_JE";   // +1 for \0
+
+#define DEBUG (info->debug_level)
 
 typedef unsigned short posn;   // should be large enough to store MAX_SENTENCE_LENGTH+1
 typedef lm::WordIndex lexeme;
@@ -86,6 +96,7 @@ struct mtu_for_sent {
 
 typedef unordered_map< lexeme, vector<mtu_item*> > mtu_item_dict;  // we want the mtu_items to be pointers so that mtu_for_sents can point at them easily
 
+
 struct hypothesis {
   char                  last_op;      // most recent operation
   const mtu_for_sent  * cur_mtu;      // the current (optional) mtu we're working on
@@ -111,8 +122,8 @@ struct hypothesis {
   //bool skippable; // recombination says we can be skipped!
   bool pruned;   // we've been pruned for post (recomb_friend!=NULL tells us that we've been recombined)
 
-  float   cost;
-  float   cost_future;
+  float W[W_MAX_ID];      // this is JUST our feature values, NOT accumulated ones
+  float   cost;   // = info->W * (sum_{this and all parents} W)
   hypothesis * prev;
   //vector<hypothesis*> *next;
   //hypothesis * recomb_friend;
@@ -180,6 +191,7 @@ private:
   lexeme max_idx;
 };
 */
+
 struct translation_info {
   lexeme sent[MAX_SENTENCE_LENGTH];
   posn N;
@@ -192,11 +204,20 @@ struct translation_info {
 
   lm::ngram::Model * language_model;
   lm::ngram::Model * opseq_model;
+  //vector< pair<lexeme,lexeme> > vocab_match;
+  unordered_map<lexeme,lexeme> vocab_match;
 
   vector< vector<mtu_for_sent*> > mtus_at;
+  vector< float > estimated_cost;
+
   float (*compute_cost)(void*,hypothesis*);
 
+  mtu_item_dict mtu_dict;
+
   //VocabDictionary * vocab_dictionary;
+  vector<operation> forced_op_seq;
+  size_t forced_op_posn;
+  set<mtuid> forced_keep_mtus;
 
   size_t bleu_intersection[4];
   size_t bleu_ref_counts[4];
@@ -213,24 +234,30 @@ struct translation_info {
   size_t   num_kbest_predictions;
   size_t   max_mtus_per_token;
   bool     allow_copy;
+  bool     forced_decode;
+  size_t   debug_level;
 
-  float    gen_s_cost;
-  float    gap_cost;
-  float    tm_cost;
-  float    lm_cost;
-  float    brevity_cost;
+  float W[W_MAX_ID];
 
   // status
   size_t total_sentence_count;
   size_t total_word_count;
   size_t next_sentence_print;
+  float  total_output_cost;
 };
 
 struct astar_item {
   hypothesis * me;
   float path_cost_to_end;
   float future_cost_to_start;
+  float W[W_MAX_ID]; // accumulated over everything we've touched
   astar_item * parent;
+};
+
+struct astar_result {
+  float cost;
+  vector<lexeme> trans;
+  float W[W_MAX_ID];
 };
 
 struct hyp_stack {
