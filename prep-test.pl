@@ -1,128 +1,108 @@
 #!/usr/bin/perl -w
 use strict;
+use ngdec;
 
-my $USAGE = "usage: prep-test.pl (options) [model.ini] < src-test-data\nwhere [options] includes:\n  --tgt file      use known translations in this file\n  --aln file      use known alignments in this file (presupposes --tgt)\n";
+$|++;
 
-my $INI=''; my $TGT=''; my $ALN='';
+my $USAGE = 
+    "usage: prep-test.pl (options) [model.ini] < src-test-data\n" .
+    "where [options] includes:\n" .
+    "  --tgt file      use known translations in this file\n" .
+    "  --aln file      use known alignments in this file (presupposes --tgt)\n" .
+    "  --tabsep        read ALL from stdin, src\\ttgt\\taln\n" .
+    "  --savev file    save the local vocab to this file\n" .
+    "  --deaccent enc  override deaccent spec in model.ini (enc=none for none)\n";
+
+my $INI=''; my $TGT=''; my $ALN=''; my $SRC=''; my $TABSEP=0; my $SAVEV = '';
+my $overrideDeaccent = '';
+
 while (1) {
     my $tmp = shift or last;
     if    ($tmp eq '--tgt') { $TGT = shift or die "$tmp requires an arguments!"; }
     elsif ($tmp eq '--aln') { $ALN = shift or die "$tmp requires an arguments!"; }
+    elsif ($tmp eq '--savev'){$SAVEV=shift or die "$tmp requires an arguments!"; }
+    elsif ($tmp eq '--deaccent'){$overrideDeaccent=shift or die "$tmp requires an arguments!"; }
+    elsif ($tmp eq '--tabsep') { $TABSEP = 1; }
     else { $INI = $tmp; last; }
 }
 
 if (($ALN ne '') && ($TGT eq '')) { die "--aln requires --tgt"; }
+if ($TABSEP && (($TGT ne '') || ($ALN ne ''))) { die "--tabsep must not be combined with --tgt or --aln"; }
+if ((not defined $INI) || ($INI eq '')) { die $USAGE; }
 
-if (not defined $INI) { die $USAGE; }
+my %opts = readINI($INI);
 
-my %opts = ();
-open F, $INI or die "cannot read $INI";
-while (<F>) {
-    chomp;
-    if (/^([^=]+)=(.+)$/) {
-        $opts{$1} = $2;
-    }
-    elsif (/^\s*$/) { next; }
-    elsif (/^\#/) { next; }
-    else { die "malformed ini line: $_"; }
-}
-close F or die;
+requireOpt(\%opts, 'lm_src_arpa');
+requireOpt(\%opts, 'lm_tgt_arpa');
 
-print STDERR "you can call ngdec with:\n% ngdec predict-lm " . (join ' ', ($opts{'lm_tgt_bin'}, $opts{'tm_bin'}, $opts{'mtus'}, 'test-file')) . "\n";
+my %srcV = read_lm_vocab($opts{'lm_src_arpa'});
+my %tgtV = ();
+if (($TGT ne '') || ($TABSEP)) { %tgtV = read_lm_vocab($opts{'lm_tgt_arpa'}); }
 
-#requireOpt(\%opts, 'lm_src_arpa');
-
-my %v = ();
-my $V = 0;
-my $Unk = 0;
-open F, mkfilename( $opts{'lm_src_arpa'} );
-my $inUnigrams = 0;
-while (<F>) {
-    chomp;
-    if (/^\\1-grams:/) { 
-        $inUnigrams = 1;
-    } elsif ($inUnigrams) {
-        if (/^\s*$/) { last; }
-        if (/^\\2-grams:/) { last; }
-        my ($prob, $word, $backoff) = split;
-        if (not defined $word) { die "malformed LM"; }
-        $v{$word} = $V;
-        if ($word eq '<unk>') { $Unk = $V; }
-        $V++;
-    }
-}
-close F;
-
-my %vt = ();
-$V = 0;
-if ($TGT ne '') {
-    open F, mkfilename( $opts{'lm_tgt_arpa'} );
-    $inUnigrams = 0;
-    while (<F>) {
-        chomp;
-        if (/^\\1-grams:/) { 
-            $inUnigrams = 1;
-        } elsif ($inUnigrams) {
-            if (/^\s*$/) { last; }
-            if (/^\\2-grams:/) { last; }
-            my ($prob, $word, $backoff) = split;
-            if (not defined $word) { die "malformed LM"; }
-            $vt{$word} = $V;
-            $V++;
-        }
-    }
-    close F;
+my %localV = ();
+if ((defined $opts{'extra_vocab'}) && (-e $opts{'extra_vocab'})) {
+    %localV = read_local_vocab($opts{'extra_vocab'});
 }
 
+my $deaccent = '';
+if (defined $opts{'deaccent'}) { $deaccent = $opts{'deaccent'}; }
+if ($overrideDeaccent ne '') {
+    if ($overrideDeaccent eq 'none') { $deaccent = ''; }
+    else { $deaccent = $overrideDeaccent; }
+}
 
 if ($ALN ne '') { open A, mkfilename($ALN); }
 if ($TGT ne '') { open T, mkfilename($TGT); }
 
-while (<>) {
-    chomp;
-    my @w = split;
-    print (scalar @w);
-    for (my $i=0; $i<@w; $i++) {
-        print ' ';
-        if (defined $v{$w[$i]}) {
-            print $v{$w[$i]};
-        } else {
-            print $Unk;
-        }
-    }
-
-    if ($TGT eq '') { print "\t0\t0\n"; next; }
-
-    $_ = <T>;
-    if (not defined $_) { print STDERR "warning: not enough lines in $TGT\n"; print "\t0\t0\n"; next; }
-    chomp;
-    @w = split;
-    print (scalar @w);
-    for (my $i=0; $i<@w; $i++) {
-        print ' ';
-        if (defined $vt{$w[$i]}) {
-            print $vt{$w[$i]};
-        } else {
-            print $Unk;
-        }
-    }
-
-    if ($ALN eq '') { print "\t0\n"; next; }
-
-    $_ = <A>;
-    if (not defined $_) { print STDERR "warning: not enough lines in $ALN\n"; print "\t0\n"; next; }
-    my @a = split;
-    print (scalar @a);
-    print $_ . "\n";
+my $vocabFile;
+if ($SAVEV ne '') {
+    local *VOC;
+    open VOC, "> $SAVEV" or die "cannot open $SAVEV for writing";
+    $vocabFile = *VOC{IO};
 }
-    
+
+while (my $inLine = <>) {
+    chomp $inLine;
+
+    my $src; my $tgt; my $aln;
+    if ($TABSEP) {
+        if ($inLine =~ /^([^\t]+)\t([^\t]+)\t([^\t]+)$/) {
+            $src = $1; $tgt = $2; $aln = $3;
+        } elsif ($inLine =~ /^([^\t]+)\t([^\t]+)$/) {
+            $src = $1; $tgt = $2;
+        } else {
+            $src = $inLine;
+        }
+    } else { $src = $inLine; }
+
+    if ($TGT ne '') {
+        $tgt = <T>;
+        if (not defined $tgt) { die "not enough lines in $TGT"; }
+        chomp $tgt;
+    }
+
+    # process target first because we want to look up unaccented source against target
+    # (sigh, yes, this assumes we're translating into English...)
+    my $tgtIds = ((defined $tgt) ? stringToIDs($deaccent, \%srcV, \%tgtV, \%localV, 0, $vocabFile, $tgt) : '0');
+    my $srcIds = stringToIDs($deaccent, \%srcV, \%tgtV, \%localV, 1, $vocabFile, $src);
+
+    print $srcIds . "\t" . $tgtIds;
+
+    if ($ALN ne '') {
+        $aln = <A>;
+        if (not defined $aln) { die "not enough lines in $ALN"; }
+        chomp $aln;
+    }
+    if (defined $aln) {
+        $aln =~ s/^\s+//; $aln =~ s/\s+$//;
+        my @a = split /\s+/, $aln;
+        print "\t" . (scalar @a) . ' ' . $aln . "\n";
+    } else {
+        print "\t0\n";
+    }
+}
 
 if ($ALN ne '') { close A; }
 if ($TGT ne '') { close T; }
 
-
-sub mkfilename {
-    my ($fn) = @_;
-    if ($fn =~ /\.gz$/) { return "zcat $fn |"; }
-    else { return $fn; }
-}
+if (defined $vocabFile) { close $vocabFile; }

@@ -1,7 +1,7 @@
 G++ = g++
 
 ARCH = $(shell test `${G++} -v 2>&1 | tail -1 | cut -d ' ' -f 3 | cut -d '.' -f 1,2` \< 4.3 && echo -march=nocona || echo -march=native)  -std=c++0x
-OPTIM_FLAGS = -O3 -ffast-math -fno-strict-aliasing -fomit-frame-pointer 
+OPTIM_FLAGS = -O3 -ffast-math -fno-strict-aliasing -fomit-frame-pointer
 
 # G++ = /usr/local/stow/gcc-4.7.2/bin/g++
 
