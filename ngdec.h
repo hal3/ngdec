@@ -174,13 +174,17 @@ struct translation_info {
   uint32_t operation_allowed;
   float    pruning_coefficient;
   size_t   max_bucket_size;
-  float    gen_s_cost;
-  float    gap_cost;
   size_t   max_gaps;
   size_t   max_gap_width;
   size_t   max_phrase_len;  // must be <= MAX_PHRASE_LEN
   size_t   num_kbest_predictions;
   size_t   max_mtus_per_token;
+
+  float    gen_s_cost;
+  float    gap_cost;
+  float    tm_cost;
+  float    lm_cost;
+  float    brevity_cost;
 
   // status
   size_t total_sentence_count;

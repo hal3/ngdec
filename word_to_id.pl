@@ -6,7 +6,8 @@ my $LMname = shift or die;
 my %v = ();
 my $V = 0;
 my $Unk = 0;
-open F, "$LMname" or die;
+if ($LMname =~ /\.gz$/) { open F, "zcat $LMname |" or die; }
+else { open F, "$LMname" or die; }
 my $inUnigrams = 0;
 while (<F>) {
     chomp;
@@ -22,7 +23,7 @@ while (<F>) {
         $V++;
     }
 }
-close F or die;
+close F;
 
 while (<>) {
     chomp;

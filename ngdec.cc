@@ -109,7 +109,7 @@ char* ensure_argument(int argc, char*argv[], int&i) {
   }
 }
 
-void turn_off_bit(size_t &data, size_t bit) {
+void turn_off_bit(uint32_t &data, size_t bit) {
   data &= ~(1<<bit);
 }
 
@@ -133,13 +133,17 @@ int initialize_translation_info(int argc, char*argv[], translation_info&info) {
   info.operation_allowed = (1 << OP_MAXIMUM) - 1;  // all operations
   info.pruning_coefficient = 10.;
   info.max_bucket_size = 500;
-  info.gen_s_cost = 10;
-  info.gap_cost = 10;
   info.max_gaps = 5;
   info.max_gap_width = 16;
   info.max_phrase_len = 5;
   info.num_kbest_predictions = 1;
   info.max_mtus_per_token = 8;
+
+  info.gen_s_cost = 10;
+  info.gap_cost = 10;
+  info.tm_cost = 1;
+  info.lm_cost = 1;
+  info.brevity_cost = 1;
 
   info.total_sentence_count = 0;
   info.total_word_count = 0;
@@ -161,6 +165,13 @@ int initialize_translation_info(int argc, char*argv[], translation_info&info) {
     else if (strcmp(argv[i], "--kbest"      ) == 0) info.num_kbest_predictions = atoi(ensure_argument(argc, argv, i));
     else if (strcmp(argv[i], "--next_print" ) == 0) info.next_sentence_print = atoi(ensure_argument(argc, argv, i));
     else if (strcmp(argv[i], "--max_mtus"   ) == 0) info.max_mtus_per_token  = atoi(ensure_argument(argc, argv, i));
+    else if (strcmp(argv[i], "--costs"      ) == 0) {
+      info.gen_s_cost   = atof(ensure_argument(argc, argv, i));
+      info.gap_cost     = atof(ensure_argument(argc, argv, i));
+      info.tm_cost      = atof(ensure_argument(argc, argv, i));
+      info.lm_cost      = atof(ensure_argument(argc, argv, i));
+      info.brevity_cost = atof(ensure_argument(argc, argv, i));
+    }
     else break;
   }
 
@@ -553,7 +564,7 @@ bool prepare_for_add(translation_info*info, hypothesis*h) {
       ng::State in_state = h->prev->tm_context ? *(h->prev->tm_context) : ng::State(info->opseq_model->BeginSentenceState());
       float log_prob = info->opseq_model->Score(in_state, this_op, *h->tm_context);
       h->tm_context_hash = ng::hash_value(*h->tm_context);
-      h->cost -= log_prob;
+      h->cost -= log_prob * info->tm_cost;
     }
 
     if (info->num_kbest_predictions > 1)
@@ -577,7 +588,7 @@ void shift_lm_context(translation_info* info, hypothesis *h, posn M, lexeme*tgt)
   }
   h->lm_context_hash = ng::hash_value(*h->lm_context);
 
-  h->cost -= log_prob;
+  h->cost -= log_prob * info->lm_cost;
 }
 
 template<class T> bool contains(set<T>* S, T t) {
@@ -673,6 +684,7 @@ void expand_one_step(translation_info *info, hypothesis *h, function<void(hypoth
         h2->cur_mtu = mtu;
         h2->queue_head = 1;
         shift_lm_context(info, h2, mtu->mtu->tgt_len, mtu->mtu->tgt);
+        //h2->cost -= info->brevity_cost * static_cast<float>(mtu->mtu->tgt_len);
 
         if (prepare_for_add(info, h2)) add_operation(h2);
       }
@@ -1481,7 +1493,7 @@ bool read_mtu_item_from_file(FILE* fd, mtu_item& mtu) {
   //cerr<<"ident="<<mtu.ident<<", nr="<<nr<<endl;
   if ((nr == 0) || (feof(fd))) return true;
 
-  nr = fscanf(fd, "%d %d\t", &mtu.tr_doc_freq, &mtu.tr_freq);
+  nr = fscanf(fd, "%ld %ld\t", &mtu.tr_doc_freq, &mtu.tr_freq);
   assert(nr == 2);
 
   mtu.gap_option = 0;
@@ -1603,21 +1615,25 @@ aligned_sentence_pair read_next_aligned_sentence(translation_info*info, FILE *fd
 
   is_new_document = false;
 
+ NEXT_LINE:
+
   nr = fscanf(fd, "%d", &cnt);
   assert(nr == 1);
 
   if (cnt == 0) {
     // this is a marker for a new document (just a single line containing "0")
     is_new_document = true;
-    nr = fscanf(fd, "%d", &cnt);
-    assert(nr == 1);
+    goto NEXT_LINE;
   }
-  assert(cnt <= MAX_SENTENCE_LENGTH);
+
+  bool skip_me = false;
+
+  if (cnt > MAX_SENTENCE_LENGTH) skip_me = true;
   vector<lexeme> F(cnt);
   for (posn i=0; i<cnt; ++i) nr = fscanf(fd, " %d", &F[i]);
 
   nr = fscanf(fd, "\t%d", &cnt);
-  assert(cnt <= MAX_SENTENCE_LENGTH);
+  if (cnt > MAX_SENTENCE_LENGTH) skip_me = true;
   vector<lexeme> e(cnt);
   for (posn i=0; i<cnt; ++i) nr = fscanf(fd, " %d", &e[i]);
 
@@ -1630,6 +1646,9 @@ aligned_sentence_pair read_next_aligned_sentence(translation_info*info, FILE *fd
     al[x].insert(w);
   }
   nr = fscanf(fd, "\n");
+
+  if (skip_me)
+    goto NEXT_LINE;
 
   compute_bleu_stats(e, &info->bleu_total_stats);
   for (posn i=0; i<4; ++i)

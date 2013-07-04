@@ -23,8 +23,8 @@ my %enFreq = ();
 my %neighbors = ();
 my $numUnaligned = 0;
 my $enTokenCount = 0;
-open EN, "$TGT_IN" or die;
-open AL, "$AL_IN" or die;
+open EN, mkfilename($TGT_IN) or die;
+open AL, mkfilename($AL_IN) or die;
 while (my $en = <EN>) {
     my $al = <AL>;
     if (not defined $al) { die "$AL_IN has fewer lines than $TGT_IN"; }
@@ -52,8 +52,8 @@ while (my $en = <EN>) {
     }
 }
 while (<AL>) { die "$AL_IN has more lines than $TGT_IN"; }
-close EN or die;
-close AL or die;
+close EN;
+close AL;
 
 print STDERR "  english tokens: $enTokenCount (" . (scalar keys %enFreq) . " word types)\n";
 print STDERR "unaligned tokens: $numUnaligned (" . (scalar keys %neighbors) . " word types)\n";
@@ -64,8 +64,8 @@ my $countConsecutive = 0;
 my $countNonConsecutive = 0;
 my $totalFixed = 0;
 my $sentenceID = 0;
-open EN, "$TGT_IN" or die;
-open AL, "$AL_IN" or die;
+open EN, mkfilename($TGT_IN) or die;
+open AL, mkfilename($AL_IN) or die;
 open O,  "> $OUTF" or die;
 while (my $en = <EN>) {
     my $al = <AL>;
@@ -194,10 +194,16 @@ while (my $en = <EN>) {
     print O "\n";
 }
 while (<AL>) { die "$AL_IN has more lines than $TGT_IN"; }
-close EN or die;
-close AL or die;
-close O  or die;
+close EN;
+close AL;
+close O;
 
 print STDERR "     consec alns: $countConsecutive\n";
 print STDERR "  nonconsec alns: $countNonConsecutive\n";
 print STDERR " reattached toks: $totalFixed\n";
+
+sub mkfilename {
+    my ($fn) = @_;
+    if ($fn =~ /\.gz$/) { return "zcat $fn |"; }
+    else { return $fn; }
+}
