@@ -33,6 +33,8 @@ my $USE_LM_BIN = '';
 my $LM_ORDER = 5;
 my $TM_ORDER = 9;
 my $TryDeaccent = '';
+my $DROP = 0;
+my $PRUNE = 1;
 
 my $USAGE = '' .
     "usage: train-model.pl [options] [par-src] [par-tgt] [par-aln] [outdir]\n" .
@@ -44,6 +46,8 @@ my $USAGE = '' .
     "  --lm_order [N]           set LM order to N (def: $LM_ORDER)\n" .
     "  --tm_order [N]           set TM order to N (def: $TM_ORDER)\n" .
     "  --deaccent [ENC]         try de-accenting target words to match source (eg, ENC=UTF-8)\n" .
+    "  --noprune                don't prune the MTUs\n" .
+    "  --drop [M]               skip the first M sentences (eg for making dev data)\n" .
     '';
 
 my $SRC;
@@ -54,6 +58,8 @@ while (1) {
     elsif ($tmp eq '--lm_order') { $LM_ORDER = shift or die "$tmp requires an argument!"; }
     elsif ($tmp eq '--tm_order') { $TM_ORDER = shift or die "$tmp requires an argument!"; }
     elsif ($tmp eq '--deaccent') { $TryDeaccent = shift or die "$tmp requires an argument!"; }
+    elsif ($tmp eq '--drop'    ) { $DROP = shift or die "$tmp requires an argument!"; }
+    elsif ($tmp eq '--noprune' ) { $PRUNE = 0; }
     elsif ($tmp =~ /^-/) { die "unknown option: '$tmp'"; }
     else { $SRC = $tmp; last; }
 }
@@ -70,12 +76,16 @@ if ($USE_LM_BIN ne '') { push @requiredFiles, $USE_LM_BIN; }
 foreach my $file (@requiredFiles) {
     if (! -e $file) { die "file does not exist '$file'"; }
 }
-if (! -d $OUT) { 
+if (! (-d $OUT)) { 
     print STDERR "making output directory '$OUT'\n";
     `mkdir -p $OUT`;
-    if (! -d $OUT) { "creating directory '$OUT' failed!"; }
+    if (! (-d $OUT)) { print STDERR "creating directory '$OUT' failed!"; }
 }
 
+
+my $SRCdropped = dropLines($SRC, "$OUT/src_tr");
+my $TGTdropped = dropLines($TGT, "$OUT/tgt_tr");
+my $ALNdropped = dropLines($ALN, "$OUT/aln_tr");
 
 
 my $LMPLZ = `which lmplz`;        chomp $LMPLZ; if ($LMPLZ eq '') { die "error: cannot find lmplz"; }
@@ -85,10 +95,10 @@ my $AnythingChanged = 0;
 
 my $SAVEV = "$OUT/extra_vocab";
 
-my $LM_TGT_ARPA = build_arpa_lm('tgt', $TGT, $LM_ORDER, $USE_LM);
+my $LM_TGT_ARPA = build_arpa_lm('tgt', $TGTdropped, $LM_ORDER, $USE_LM);
 my $LM_TGT_BIN  = build_binary_lm('tgt', $LM_TGT_ARPA, $USE_LM_BIN);
 
-my $LM_SRC_ARPA = build_arpa_lm('src', $SRC, 2, '');
+my $LM_SRC_ARPA = build_arpa_lm('src', $SRCdropped, 2, '');
 my $LM_SRC_BIN  = build_binary_lm('src', $LM_SRC_ARPA, '');
 
 my $ALN_PE = postedit_alignments();
@@ -111,10 +121,15 @@ my $NGDEC  = combine_all();
 
 if (defined $vocabFile) { close $vocabFile; }
 
-my $MTUS0 = run("$OUT/mtus", "./ngdec extract $NGDEC > {}");
-my $MTUS  = run("$OUT/mtus-pruned", "./prune_mtu_dict.pl < $MTUS0 > {}");
+my $NGDECdropped = dropLines($NGDEC, "$OUT/train.ngdec");
 
-my $OPSEQ = run("$OUT/opseq", "./ngdec oracle $MTUS $VOCAB_MATCH $NGDEC > {}");
+my $MTUS0 = run("$OUT/mtus", "./ngdec extract $NGDECdropped > {}");
+my $MTUS  = $MTUS0;
+if ($PRUNE) {
+    $MTUS  = run("$OUT/mtus-pruned", "./prune_mtu_dict.pl < $MTUS0 > {}");
+}
+
+my $OPSEQ = run("$OUT/opseq", "./ngdec oracle $MTUS $VOCAB_MATCH $NGDECdropped > {}");
 
 my $TM_ARPA = build_arpa_lm('ops', $OPSEQ, $TM_ORDER, '');
 my $TM_BIN  = build_binary_lm('ops', $TM_ARPA, '');
@@ -203,18 +218,18 @@ sub match_vocabulary {
 }
 
 sub combine_all {
-    if ((-e "$OUT/train") && (not $AnythingChanged)) {
-        print STDERR "skipping: $OUT/train // combine_all\n";
-        return "$OUT/train";
+    if ((-e "$OUT/all.ngdec") && (not $AnythingChanged)) {
+        print STDERR "skipping: $OUT/all.ngdec // combine_all\n";
+        return "$OUT/all.ngdec";
     }
     $AnythingChanged = 1;
 
-    print STDERR "running: combine_all > $OUT/train\n";
+    print STDERR "running: combine_all > $OUT/all.ngdec\n";
 
     if (not $readSrcV) { %srcV = read_lm_vocab($LM_SRC_ARPA); $readSrcV = 1; };
     if (not $readTgtV) { %tgtV = read_lm_vocab($LM_TGT_ARPA); $readTgtV = 1; };
 
-    open O, "> $OUT/train" or die;
+    open O, "> $OUT/all.ngdec" or die;
 
     open F, mkfilename($SRC) or die;
     open E, mkfilename($TGT) or die;
@@ -244,7 +259,7 @@ sub combine_all {
 
     close O;
 
-    return "$OUT/train";
+    return "$OUT/all.ngdec";
 }
 
 sub run {
@@ -273,4 +288,21 @@ sub run {
 
     $AnythingChanged = 1;
     return $outFile;
+}
+
+sub dropLines {
+    my ($inF, $outF) = @_;
+    if ($DROP == 0) { return $inF; }
+    print STDERR "dropping lines from $inF to $outF\n";
+    open OUTF, "> $outF" or die;
+    open INF, mkfilename($inF) or die;
+    for (my $ln=0; $ln<$DROP; $ln++) {
+        $_ = <INF>; if (not defined $_) { last; }
+    }
+    if (defined $_) {
+        while (<INF>) { print OUTF $_; }
+    }
+    close INF;
+    close OUTF;
+    return $outF;
 }

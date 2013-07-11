@@ -121,6 +121,7 @@ struct hypothesis {
 
   //bool skippable; // recombination says we can be skipped!
   bool pruned;   // we've been pruned for post (recomb_friend!=NULL tells us that we've been recombined)
+  posn num_generated;  // how many target-side words have we generated
 
   float W[W_MAX_ID];      // this is JUST our feature values, NOT accumulated ones
   float   cost;   // = info->W * (sum_{this and all parents} W)
@@ -129,6 +130,7 @@ struct hypothesis {
   //hypothesis * recomb_friend;
   vector<hypothesis*> * recomb_friends;  // if we're the BEST, then recomb_friends is everything that's equivalent to us but worse
   bool recombined;  // if we're not the BEST then we've been recombined
+  bool follows_optimal_path;
 };
   
 
@@ -164,6 +166,37 @@ template<class T> struct ring {
 };
 
 typedef ring<hypothesis> hypothesis_ring;
+
+class VocabDictionary : public lm::EnumerateVocab {
+ private:
+  vector<char> data;
+  vector<size_t> index;
+  size_t max_idx;
+  size_t cur_pos;
+
+ public:
+  VocabDictionary() {
+    data.reserve(5 * 100000); // 100k words, avg 4 chars long + \0 terminating
+    index.push_back(0);
+    max_idx = 0;
+    cur_pos = 0;
+  }
+
+  void Add(lexeme idx, const StringPiece &str) {
+    assert(idx == max_idx);
+    size_t len = str.length();
+    data.reserve(cur_pos + len + 1);
+    strcpy(data.data() + cur_pos, str.data());
+    cur_pos += len + 1;
+    index.push_back(cur_pos);
+    max_idx++;
+  }
+
+  const char* Get(lexeme idx) {
+    assert(idx < max_idx);
+    return data.data() + index[idx];
+  }
+};  
 
 /*
 class VocabDictionary : public lm::EnumerateVocab {
@@ -202,8 +235,8 @@ struct translation_info {
 
   recombination_data * recomb_buckets;
 
-  lm::ngram::Model * language_model;
-  lm::ngram::Model * opseq_model;
+  lm::ngram::ProbingModel * language_model;
+  lm::ngram::ProbingModel * opseq_model;
   //vector< pair<lexeme,lexeme> > vocab_match;
   unordered_map<lexeme,lexeme> vocab_match;
 
@@ -214,7 +247,7 @@ struct translation_info {
 
   mtu_item_dict mtu_dict;
 
-  //VocabDictionary * vocab_dictionary;
+  VocabDictionary * vocab_dictionary;
   vector<operation> forced_op_seq;
   size_t forced_op_posn;
   set<mtuid> forced_keep_mtus;
@@ -235,21 +268,17 @@ struct translation_info {
   size_t   max_mtus_per_token;
   bool     allow_copy;
   bool     forced_decode;
+  size_t   train_laso;   // 0 = don't train, >=1 means that many iterations
   size_t   debug_level;
 
   float W[W_MAX_ID];
-
-  float    gen_s_cost;
-  float    gap_cost;
-  float    tm_cost;
-  float    lm_cost;
-  float    brevity_cost;
 
   // status
   size_t total_sentence_count;
   size_t total_word_count;
   size_t next_sentence_print;
   float  total_output_cost;
+  size_t num_laso_updates;
 };
 
 struct astar_item {

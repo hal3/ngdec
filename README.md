@@ -28,6 +28,12 @@
  1. Run make
  2. Run ./ngdec
 
+-- (Optional) Make sure PERL is configured properly --
+
+ 1. Install perl (I really hope you don't have to do this)
+ 2. Install Text/Unaccent.pm (eg "cpan Text::Unaccent")
+    (This is only required if you want to use our data prep scripts)
+
 **********************************************************************
 ************************ RUNNING A TEST CASE *************************
 **********************************************************************

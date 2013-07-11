@@ -11,9 +11,11 @@ my $USAGE =
     "  --aln file      use known alignments in this file (presupposes --tgt)\n" .
     "  --tabsep        read ALL from stdin, src\\ttgt\\taln\n" .
     "  --savev file    save the local vocab to this file\n" .
-    "  --deaccent enc  override deaccent spec in model.ini (enc=none for none)\n";
+    "  --deaccent enc  override deaccent spec in model.ini (enc=none for none)\n" .
+    "  --head m        only use the first m lines\n" .
+    '';
 
-my $INI=''; my $TGT=''; my $ALN=''; my $SRC=''; my $TABSEP=0; my $SAVEV = '';
+my $INI=''; my $TGT=''; my $ALN=''; my $SRC=''; my $TABSEP=0; my $SAVEV = ''; my $HEAD = 0;
 my $overrideDeaccent = '';
 
 while (1) {
@@ -23,6 +25,7 @@ while (1) {
     elsif ($tmp eq '--savev'){$SAVEV=shift or die "$tmp requires an arguments!"; }
     elsif ($tmp eq '--deaccent'){$overrideDeaccent=shift or die "$tmp requires an arguments!"; }
     elsif ($tmp eq '--tabsep') { $TABSEP = 1; }
+    elsif ($tmp eq '--head') { $HEAD=shift or die "$tmp requires an arguments!"; }
     else { $INI = $tmp; last; }
 }
 
@@ -61,8 +64,11 @@ if ($SAVEV ne '') {
     $vocabFile = *VOC{IO};
 }
 
+my $lineNum = 0;
 while (my $inLine = <>) {
     chomp $inLine;
+    $lineNum++;
+    if (($HEAD > 0) && ($lineNum > $HEAD)) { last; }
 
     my $src; my $tgt; my $aln;
     if ($TABSEP) {
