@@ -146,6 +146,9 @@ void initialize_translation_info(translation_info &info) {
   info.num_kbest_predictions = 1;
   info.max_mtus_per_token = 64;
   info.allow_copy = true;
+  info.forced_decode = false;
+  info.train_laso = 0;
+  info.debug_level = 0;
 
   info.W[W_GEN_S] = 10;
   info.W[W_GAP] = 10;
@@ -438,7 +441,6 @@ void reset_next_hypothesis(translation_info*info, hypothesis *h, hypothesis *h2)
     if (h->lm_context != NULL) {
       memcpy(h2->lm_context, h->lm_context, sizeof(ng::State));
     } else {
-      h2->lm_context->ZeroRemaining();
       h2->lm_context->length = 0;
     }
   }
@@ -449,7 +451,6 @@ void reset_next_hypothesis(translation_info*info, hypothesis *h, hypothesis *h2)
     if (h->tm_context != NULL) {
       memcpy(h2->tm_context, h->tm_context, sizeof(ng::State));
     } else {
-      h2->tm_context->ZeroRemaining();
       h2->tm_context->length = 0;
     }
   }
@@ -735,7 +736,7 @@ inline float score_language_model(translation_info*info, ng::State *from, lexeme
   return lp;
 }
 
-void try_single_expansion(translation_info*info, operation op, size_t num_skipped, bool follows_optimal_path0, hypothesis*h, hypothesis*&h2, mtu_for_sent*mtu, posn m, float incr_cost, float prune_if_gt, float*incrW, bitset<MAX_SENTENCE_LENGTH>*new_gaps, bool &new_gaps_alloc, posn new_gaps_count, function<void(hypothesis*)> add_operation, ng::State cur_tm_state) {
+void try_single_expansion(translation_info*info, operation op, size_t num_skipped, bool follows_optimal_path0, hypothesis*h, hypothesis*&h2, mtu_for_sent*mtu, posn m, float incr_cost, float prune_if_gt, float*incrW, bitset<MAX_SENTENCE_LENGTH>*new_gaps, bool &new_gaps_alloc, posn new_gaps_count, bool &new_gaps_used, function<void(hypothesis*)> add_operation, ng::State cur_tm_state) {
   bool follows_optimal_path = follows_optimal_path0;
 
   if (follows_optimal_path && need_op_sequence(info)) {
@@ -750,8 +751,10 @@ void try_single_expansion(translation_info*info, operation op, size_t num_skippe
 
   if (h2 == NULL)
     h2 = get_next_hypothesis(info, h);
-  else
+  else {
+    h2->gaps_alloc = false;
     reset_next_hypothesis(info, h, h2);
+  }
 
   ng::State cur_lm_state = h->lm_context ? *(h->lm_context) : ng::State(info->language_model->BeginSentenceState()); // TODO: move this out of the loop
   bool set_h2_lm_state = false;
@@ -811,10 +814,6 @@ void try_single_expansion(translation_info*info, operation op, size_t num_skippe
   } else if (op.op == OP_CONT_WORD) {
     h2->queue_head++;
   }
-
-  h2->gaps = new_gaps;
-  h2->gaps_alloc = new_gaps_alloc;
-  h2->gaps_count = new_gaps_count;
 
   h2->Z = MAX(h2->Z, h2->n);
 
@@ -889,10 +888,15 @@ void try_single_expansion(translation_info*info, operation op, size_t num_skippe
     }
 
   h2->follows_optimal_path = follows_optimal_path;
+  h2->gaps = new_gaps;
+  h2->gaps_alloc = new_gaps_alloc;
+  h2->gaps_count = new_gaps_count;
+
   add_operation(h2);
 
   h2 = NULL;  // so we don't try to reuse it!
   new_gaps_alloc = false; // tricky! only want first hypothesis to actually keep it!
+  new_gaps_used = true;
 }
 
 void expand_to_generation_new(translation_info *info, hypothesis *h, function<void(hypothesis*)> add_operation, float prune_if_gt=FLT_MAX) {
@@ -931,8 +935,8 @@ void expand_to_generation_new(translation_info *info, hypothesis *h, function<vo
 
   hypothesis *h2 = NULL;
   ng::State cur_tm_state, tmp_tm_state;
-  cur_tm_state.ZeroRemaining(); cur_tm_state.length = 0;
-  tmp_tm_state.ZeroRemaining(); tmp_tm_state.length = 0;
+  cur_tm_state.length = 0;
+  tmp_tm_state.length = 0;
 
   posn num_gaps_passed = 0;
   posn first_gap_posn = 0;
@@ -1076,6 +1080,7 @@ void expand_to_generation_new(translation_info *info, hypothesis *h, function<vo
     bitset<MAX_SENTENCE_LENGTH>*new_gaps_ptr = h->gaps;
     bool new_gaps_alloc = false;
     size_t new_gaps_count = h->gaps_count;
+    bool new_gaps_used = false;
   
     for (operation op : skipped) {
       //get_op_string(op.op, op.arg1, op_string);
@@ -1118,7 +1123,7 @@ void expand_to_generation_new(translation_info *info, hypothesis *h, function<vo
       if (operation_allowed(info, OP_CONT_WORD) && (here == m)) {
         if (DEBUG >= 5) cerr << "OP_CONT_WORD: " << m << endl;
         operation my_op = { OP_CONT_WORD, 0, m };
-        try_single_expansion(info, my_op, skipped.size(), follows_optimal_path, h, h2, 0, m, incr_cost, prune_if_gt, incrW, new_gaps_ptr, new_gaps_alloc, new_gaps_count, add_operation, cur_tm_state);
+        try_single_expansion(info, my_op, skipped.size(), follows_optimal_path, h, h2, 0, m, incr_cost, prune_if_gt, incrW, new_gaps_ptr, new_gaps_alloc, new_gaps_count, new_gaps_used, add_operation, cur_tm_state);
       }
     } else {
       for (mtu_for_sent* mtu : info->mtus_at[m]) {
@@ -1153,7 +1158,7 @@ void expand_to_generation_new(translation_info *info, hypothesis *h, function<vo
         // if ((num_gaps_passed>0) && (diff(next_word_pos,first_gap_posn) > info->max_gap_width)) {
         // } else
         if (true || h->gaps_count + num_gaps_required <= info->max_gaps) {
-          try_single_expansion(info, my_op, skipped.size(), follows_optimal_path, h, h2, mtu, m, incr_cost, prune_if_gt, incrW, new_gaps_ptr, new_gaps_alloc, new_gaps_count, add_operation, cur_tm_state);
+          try_single_expansion(info, my_op, skipped.size(), follows_optimal_path, h, h2, mtu, m, incr_cost, prune_if_gt, incrW, new_gaps_ptr, new_gaps_alloc, new_gaps_count, new_gaps_used, add_operation, cur_tm_state);
         } else {
           //cerr << "?";
         }
@@ -1161,7 +1166,7 @@ void expand_to_generation_new(translation_info *info, hypothesis *h, function<vo
     }
     if (operation_allowed(info, OP_GEN_S)) {
       operation my_op = { OP_GEN_S, info->sent[m], m };
-      try_single_expansion(info, my_op, skipped.size(), follows_optimal_path, h, h2, 0, m, incr_cost, prune_if_gt, incrW, new_gaps_ptr, new_gaps_alloc, new_gaps_count, add_operation, cur_tm_state);
+      try_single_expansion(info, my_op, skipped.size(), follows_optimal_path, h, h2, 0, m, incr_cost, prune_if_gt, incrW, new_gaps_ptr, new_gaps_alloc, new_gaps_count, new_gaps_used, add_operation, cur_tm_state);
 
       //cerr << "OP_GEN_S: " << info->sent[m] << endl;
       //possible_ops.push_back( my_op );
@@ -1169,6 +1174,9 @@ void expand_to_generation_new(translation_info *info, hypothesis *h, function<vo
     }
     //bool follows_optimal_path0 = follows_optimal_path;
     //assert(possible_ops.size() == possible_mtus.size());
+
+    if (new_gaps_alloc && !new_gaps_used)
+      delete new_gaps_ptr;
   }
 }
 
@@ -1701,9 +1709,10 @@ vector<hypothesis*> stack_generic_search(translation_info *info, size_t (*get_st
     for (auto vec = info->recomb_buckets->begin(); vec != info->recomb_buckets->end(); ++vec)
       (*vec).clear();
 
+  vector<hypothesis*> Goals = Stacks[GoalStack]->Stack;
+
   for (auto it : Stacks) 
-    if (it.first != GoalStack)
-      delete it.second;
+    delete it.second;
 
   // for (hypothesis *h : Stacks[GoalStack]->Stack) {
   //   float c = 0.;
@@ -1723,7 +1732,7 @@ vector<hypothesis*> stack_generic_search(translation_info *info, size_t (*get_st
   //   assert( fabs(c - h->cost) < 1e-3 );
   // }
 
-  return Stacks[GoalStack]->Stack;
+  return Goals;
 }
 
 /*
@@ -1888,7 +1897,7 @@ posn filter_gap_width(posn j, bitset<MAX_SENTENCE_LENGTH> fcov, posn init_gap_wi
 
 // TODO: don't allow predict_forced if alignments don't exist!
 
-vector<operation> get_operation_sequence(unordered_map<lexeme,lexeme> vocab_match, aligned_sentence_pair data, mtu_item_dict *dict, set<mtuid> *keep_mtus) {
+vector<operation> get_operation_sequence(unordered_map<lexeme,lexeme> &vocab_match, aligned_sentence_pair data, mtu_item_dict *dict, set<mtuid> *keep_mtus) {
   auto f = data.F;
   auto E = data.E;
   auto A = data.A;
@@ -2144,7 +2153,7 @@ void set_info_from_string(char*p, char*otherstring, translation_info *info, bool
 
   if (sscanf(p, "w_ALL=%g,%g,%g,%g,%g,%g", &info->W[0], &info->W[1], &info->W[2], &info->W[3], &info->W[4], &info->W[5])) return;  // TODO: make this work with arbitrary # weight ids
 
-  nr = sscanf(p, "vocab_match=%a[^ \t\n]", &otherstring);
+  nr = sscanf(p, "vocab_match=%[^ \t\n]", otherstring);
   if (nr > 0) {
     info->vocab_match.clear();
     cerr << "reading vocab_match from " << otherstring << endl;
@@ -2166,7 +2175,7 @@ void set_info_from_string(char*p, char*otherstring, translation_info *info, bool
   if (sscanf(p, "w_BREV=%g", &info->W[W_BREV])) return;
   if (sscanf(p, "w_COPY=%g", &info->W[W_COPY])) return;
 
-  nr = sscanf(p, "lm_tgt_bin=%a[^ \t\n]", &otherstring);
+  nr = sscanf(p, "lm_tgt_bin=%[^ \t\n]", otherstring);
   if (nr > 0) { 
     if (info->language_model != NULL) delete info->language_model;
     cerr << "reading language model from " << otherstring << endl;
@@ -2175,7 +2184,7 @@ void set_info_from_string(char*p, char*otherstring, translation_info *info, bool
     return;
   }
 
-  nr = sscanf(p, "tm_bin=%a[^ \t\n]", &otherstring);
+  nr = sscanf(p, "tm_bin=%[^ \t\n]", otherstring);
   if (nr > 0) { 
     if (info->opseq_model != NULL) delete info->opseq_model;
     cerr << "reading opseq model from " << otherstring << endl;
@@ -2184,7 +2193,7 @@ void set_info_from_string(char*p, char*otherstring, translation_info *info, bool
     return;
   }
     
-  nr = sscanf(p, "mtus=%a[^ \t\n]", &otherstring);
+  nr = sscanf(p, "mtus=%[^ \t\n]", otherstring);
   if (nr > 0) { 
     cerr << "reading mtus from " << otherstring << endl;
     FILE *fd = fopen(otherstring, "r");
@@ -2379,6 +2388,7 @@ void test_align() {
   for (auto &op : op_seq)
     cout << "op=" << OP_NAMES[(uint32_t)op.op] << "\targ=(" << op.arg1 << ", " << op.arg2 << ")" << endl;
 
+  vocab_match.clear();
 }
 
 void test_decode() {
@@ -2597,6 +2607,7 @@ void oracle(translation_info*info, int argc, char*argv[]) {
   mtu_item_dict dict = read_mtu_item_dict(fd);
   fclose(fd);
 
+  info->vocab_match.clear();
   info->vocab_match = read_vocab_match(argv[1]);
   
   fd = fopen(argv[2], "r");
@@ -2806,10 +2817,12 @@ int main(int argc, char*argv[]) {
   argc -= 2;  argv += 2;
 
   translation_info info;
-  memset(&info, 0, sizeof(translation_info));
   initialize_translation_info(info);
 
   cmd(&info, argc, argv);
+
+  info.vocab_match.clear();
+  info.mtu_dict.clear();
 
   StolenFromKenLM::print_system_usage(&info, started_timespec);
 

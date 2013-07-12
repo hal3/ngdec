@@ -1,5 +1,4 @@
 use strict;
-use Text::Unaccent;  # can be commented out if you'll never use --deaccent
 
 require 5.005;
 
@@ -101,8 +100,15 @@ sub requireOpt {
 
 sub deaccent {
     my ($Encoding, $txt) = @_;
-    # simple
-    $txt = unac_string($Encoding, $txt);
+    BEGIN {
+        if (eval "use Text::Unaccent") {
+            # simple
+            $txt = unac_string($Encoding, $txt);
+        } else {
+            warn "you're trying to de-accent but don't have Text::Unaccent!";
+        }
+    }
+    warn $@ if $@;
     # remove combining marks
     $txt =~ s/\pM//og;
     # in case of european style numbers:
